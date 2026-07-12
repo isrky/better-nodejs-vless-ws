@@ -11,7 +11,7 @@ const crypto = require('crypto');
 const UUID = process.env.UUID || '7bd180e8-1142-4387-93f5-03e8d750a896';
 const TARGET_UUID_BYTES = Buffer.from(UUID.replace(/-/g, ''), 'hex');
 
-const WSPATH = process.env.WSPATH || UUID.slice(0, 8);
+const WSPATH = process.env.WSPATH || '/';
 const PORT = parseInt(process.env.SERVER_PORT || process.env.PORT || '3000', 10);
 const HOST = process.env.SERVER_HOST || process.env.HOST || '0.0.0.0';
 
@@ -1403,7 +1403,7 @@ const server = net.createServer((client) => {
       }
 
       if (method === 'GET' && headers['upgrade'] && headers['upgrade'].toLowerCase() === 'websocket') {
-        if (!path.includes('/' + WSPATH)) {
+        if (!path.includes(WSPATH)) {
           sendHttpResponse(client, 200, 'text/html; charset=utf-8', FAKE_INDEX_HTML);
           return destroy('Bad WS Path - served fake page');
         }
@@ -1541,7 +1541,7 @@ const server = net.createServer((client) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`\n Native vls-WS Server Active on ${HOST}:${PORT}\nPath: /${WSPATH}\nUUID: ${UUID}\n`);
+  console.log(`\n Native vls-WS Server Active on ${HOST}:${PORT}\nPath: ${WSPATH}\nUUID: ${UUID}\n`);
   console.log(` Admin Stats: http://${HOST}:${PORT}/admin-stats\n`);
 });
 
