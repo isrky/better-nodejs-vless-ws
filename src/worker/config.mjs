@@ -44,6 +44,8 @@ export function getUuidBytes(env) {
   return bytes;
 }
 
+// Matched as a substring of the request path, so a leading slash is optional.
+// Usually set as a secret rather than a committed var — see wrangler.toml.
 export const getWsPath = (env) => env.WSPATH || '/';
 export const getProxyIp = (env) => (env.PROXYIP || '').trim();
 export const getDohUrl = (env) => env.DOH_URL || 'https://cloudflare-dns.com/dns-query';

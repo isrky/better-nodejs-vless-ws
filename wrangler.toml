@@ -7,8 +7,13 @@ compatibility_date = "2025-06-01"
 # No compatibility_flags on purpose: the Worker is Buffer-free, so skipping
 # nodejs_compat keeps the bundle small and cold starts fast.
 
-[vars]
-WSPATH = "/"
+# WSPATH is deliberately not set here. Anything under [vars] is committed, so
+# a path checked into a public repository provides no obscurity at all. Set it
+# as a secret alongside UUID instead:
+#   npx wrangler secret put WSPATH
+# Unset, it defaults to "/", which matches every WebSocket upgrade. That is
+# safe — UUID is the actual credential — but a random path means probes never
+# reach the VLESS handler and only ever see the cover page.
 
 # PROXYIP is close to mandatory in practice — Workers cannot open a TCP
 # connection back into Cloudflare's own edge, so destinations behind Cloudflare

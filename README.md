@@ -166,7 +166,17 @@ npx wrangler dev --remote        # local dev (--remote is required: outbound TCP
 npx wrangler tail                # live logs
 ```
 
-`WSPATH`, `PROXYIP`, and `DOH_URL` are set in `wrangler.toml` under `[vars]`. `UUID` is the only authentication credential, so it belongs in a secret rather than the committed config.
+`DOH_URL` is an ordinary `[vars]` entry in `wrangler.toml`. `UUID`, `WSPATH`, and `PROXYIP` should all be secrets: the first is the authentication credential, and the other two would otherwise be published in the repository, which defeats the point of a non-obvious path and advertises your relay host.
+
+```bash
+npx wrangler secret put UUID       # required
+npx wrangler secret put WSPATH     # optional, e.g. a random 16-hex string
+npx wrangler secret put PROXYIP    # optional, e.g. 203.0.113.5:8443
+```
+
+Secrets survive redeployment, whereas plain-text vars are overwritten from `wrangler.toml` on every `wrangler deploy` — so a value set only in the dashboard as an unencrypted variable disappears the next time you push.
+
+`WSPATH` is matched as a substring of the request path, so a leading slash is optional and query suffixes like `?ed=2048` still match. Unset, it defaults to `/`, which matches every upgrade; that is safe, since `UUID` is what actually authenticates, but a random path means scanners never reach the VLESS handler and only ever see the cover page.
 
 ### Feature Parity
 
