@@ -258,8 +258,20 @@ Two details in it are deliberate and worth understanding before changing them.
 
 The `listen`/`port`/`sockopt.mark` values are specific to your nftables or iptables TPROXY rules and will need adjusting to match them.
 
-> [!TIP]
-> If your `serverName` differs from the hostname in `wsSettings.host` — an SNI-fronting arrangement — expect Cloudflare to reject it. The edge terminates TLS by SNI and then routes by the `Host` header, refusing requests where the two disagree. Set both to your own hostname; if SNI-based blocking is the problem you are solving, a custom domain on Cloudflare is the fix, since it gives you an unblocked name that legitimately matches both.
+> [!IMPORTANT]
+> **`serverName` must equal `wsSettings.host`.** SNI fronting does not work on Cloudflare, including when the SNI is another Cloudflare domain. The edge terminates TLS by SNI, then compares the `Host` header against it and rejects mismatches:
+>
+> ```
+> SNI=www.cloudflare.com  Host=www.cloudflare.com          -> 200 OK
+> SNI=www.cloudflare.com  Host=developers.cloudflare.com   -> 403 Forbidden
+> SNI=www.cloudflare.com  Host=<anything>.workers.dev      -> 403 Forbidden
+> ```
+>
+> Carrying an SNI-fronting arrangement over from a self-hosted server therefore fails, with no WebSocket upgrade. If SNI-based blocking is the problem you are solving, a custom domain on Cloudflare is the fix: it gives you an unblocked hostname that legitimately matches both SNI and `Host`.
+>
+> Note that verifying this yourself requires `curl --http1.1`. Over HTTP/2 curl derives `:authority` from the URL and silently discards a manually set `Host` header, which makes every combination look like it succeeds.
+
+If `workers.dev` resolves to slow edge IPs from your network, you can dial a specific Cloudflare address instead — set `vnext[0].address` to that IP while leaving `serverName` and `wsSettings.host` as your hostname. Cloudflare serves any customer domain from any of its edge IPs, so this stays within the matching rule above and is not fronting.
 
 Do not carry a `pinnedPeerCertSha256` over from a self-hosted setup. It pins one specific certificate, and Cloudflare presents its own and rotates it, so the handshake fails within weeks at best.
 
