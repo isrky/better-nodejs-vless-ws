@@ -1,0 +1,88 @@
+{
+  "routing": {
+    "rules": [
+      {
+        "network": "tcp,udp",
+        "port": "53",
+        "outboundTag": "vless"
+      },
+      {
+        "network": "udp",
+        "outboundTag": "block"
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls"
+        ]
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "vless",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "<your-host>",
+            "port": 443,
+            "users": [
+              {
+                "id": "<your-uuid>",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "<your-host>",
+          "certificates": [
+            {
+              "usage": "verify",
+              "certificate": [
+                "-----BEGIN CERTIFICATE-----",
+                "<your network's TLS-interception CA, base64 lines>",
+                "-----END CERTIFICATE-----"
+              ]
+            }
+          ]
+        },
+        "wsSettings": {
+          "path": "/<your-wspath>?ed=2048",
+          "host": "<your-host>"
+        },
+        "sockopt": {
+          "domainStrategy": "UseIPv4"
+        }
+      },
+      "mux": {
+        "enabled": true,
+        "concurrency": -1,
+        "xudpConcurrency": 1024,
+        "xudpProxyUDP443": "reject"
+      }
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    }
+  ]
+}

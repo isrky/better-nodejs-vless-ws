@@ -255,7 +255,17 @@ Same as above, with these differences:
 
 ### Linux Transparent Proxy (TPROXY)
 
-[`examples/xray-tproxy-client.json`](examples/xray-tproxy-client.json) is a complete Xray-core client config for a system-wide transparent proxy. Copy it, replace the four `<...>` placeholders, and keep your working copy out of version control — `conf.json` and `conf-android.json` are both gitignored for exactly this purpose, since they end up holding your UUID and WSPATH. Only files under `examples/` are tracked, and those contain nothing but placeholders.
+[`conf.json`](conf.json) is a complete Xray-core client config for a system-wide transparent proxy, and [`conf-android.json`](conf-android.json) is its counterpart for a phone — a local SOCKS inbound instead of TPROXY, plus the extras a filtered mobile network needs.
+
+Both are templates. Every secret in them is a `<...>` placeholder, and the three host fields deliberately share one token, because `serverName`, `wsSettings.host` and the outbound address must all be identical. Copy the one you need into `local/`, which is gitignored, and fill in your own values there:
+
+```bash
+cp conf-android.json local/
+$EDITOR local/conf-android.json
+xray run -c local/conf-android.json
+```
+
+Keeping the working copy in `local/` rather than editing the template in place is what stops a real UUID and WSPATH reaching a commit.
 
 Two details in it are deliberate and worth understanding before changing them.
 
@@ -289,7 +299,7 @@ Some networks — corporate, school, and national filters — terminate every TL
 - **HTTP/2 stops working**, because interception forces traffic back to HTTP/1.1. WebSocket is what survives, which is why this transport is the right choice here even though Xray now prints `WebSocket transport … is deprecated, migrate to XHTTP H2 & H3` on startup. **Ignore that warning on such a network.** H2 is precisely what the middlebox breaks, and H3 is QUIC over UDP, which these networks generally block outside ports 53 and 123. Do not "migrate" and expect it to keep working.
 - **The certificate your client sees is not Cloudflare's.** You have to trust the interception CA, or the handshake fails.
 
-Add the CA to `tlsSettings.certificates` rather than installing it system-wide:
+Add the CA to `tlsSettings.certificates` rather than installing it system-wide. [`conf-android.json`](conf-android.json) is set up this way already, with the certificate itself left as a placeholder for you to paste over:
 
 ```json
 "tlsSettings": {
@@ -301,6 +311,8 @@ Add the CA to `tlsSettings.certificates` rather than installing it system-wide:
 ```
 
 This **adds** to the system trust store rather than replacing it — `disableSystemRoot` defaults to `false` — so ordinary public certificates still validate. On Android this is not merely tidier but required: Go reads only `/system/etc/security/cacerts`, so a CA you install through Settings is invisible to Xray.
+
+Note that forgetting to replace the placeholder is not caught by `xray run -test`. Xray ignores PEM it cannot parse rather than rejecting the config, so the certificate is simply never added to the pool. That fails closed rather than open — verification still runs against the public roots — but it surfaces as an `x509` error when you connect, not when you validate. If a config that tests clean fails to handshake on an intercepting network, check the certificate block first.
 
 Two caveats. On **Windows** a CA supplied this way is silently ignored unless you also set `disableSystemRoot: true`, which then drops the public roots; import it into the Windows certificate store instead. And `alpn` should be **left unset** — Xray's WebSocket dialer already pins `http/1.1`, so setting it explicitly does nothing and setting `["h2","http/1.1"]` will break the upgrade.
 
@@ -335,7 +347,9 @@ Finally, if the network is IPv4-only — common behind such filters — an AAAA 
 
 ```
 appws.js              # Node.js server (single file)
-examples/             # client configuration templates
+conf.json             # client template: Linux system-wide TPROXY
+conf-android.json     # client template: Android / local SOCKS
+local/                # your filled-in copies (gitignored)
 src/vless.js          # VLESS parser + byte queue, shared by both builds
 src/worker/           # Cloudflare Workers build
   index.mjs           #   fetch entry: routing, handshake, header parse

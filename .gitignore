@@ -2,7 +2,6 @@ node_modules/
 .wrangler/
 .dev.vars
 
-# Working client configs — these hold a real UUID and WSPATH.
-# Templates with placeholders live in examples/ and are tracked.
-conf.json
-conf-android.json
+# Working copies with real credentials. The tracked files at the repo
+# root are placeholder templates — copy one here and fill it in.
+local/
