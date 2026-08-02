@@ -14,16 +14,22 @@ export default {
     if ((request.headers.get('Upgrade') || '').toLowerCase() !== 'websocket') {
       return decoyResponse();
     }
+    // Fail closed. With no credential configured there is nothing to
+    // authenticate against, so behave like the ordinary web server we are
+    // pretending to be rather than accepting anyone who connects.
+    const uuidBytes = getUuidBytes(env);
+    if (!uuidBytes) return decoyResponse();
+
     // Same substring match as the Node build, so existing client configs and
     // the ?ed=2048 early-data suffix keep resolving.
     const url = new URL(request.url);
     if (!url.pathname.includes(getWsPath(env))) return decoyResponse();
 
-    return handleVless(request, env, ctx);
+    return handleVless(request, env, ctx, uuidBytes);
   }
 };
 
-function handleVless(request, env, ctx) {
+function handleVless(request, env, ctx, uuidBytes) {
   const [client, server] = Object.values(new WebSocketPair());
   server.accept();
 
@@ -41,16 +47,15 @@ function handleVless(request, env, ctx) {
   // waitUntil is required, not belt-and-braces: returning the 101 ends the
   // request context, and without this the runtime cancels the relay before it
   // has read a single byte.
-  ctx.waitUntil(pump(server, readable, env, ctx).catch(() => safeClose(server)));
+  ctx.waitUntil(pump(server, readable, env, ctx, uuidBytes).catch(() => safeClose(server)));
 
   return new Response(null, { status: 101, webSocket: client });
 }
 
 /** Accumulate until the VLESS header is complete, then hand off by command. */
-async function pump(ws, readable, env, ctx) {
+async function pump(ws, readable, env, ctx, uuidBytes) {
   const reader = readable.getReader();
   const queue = new ByteQueue();
-  const uuidBytes = getUuidBytes(env);
 
   for (;;) {
     const { value, done } = await reader.read();

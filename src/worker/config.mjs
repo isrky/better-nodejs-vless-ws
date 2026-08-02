@@ -2,28 +2,43 @@ import vless from '../vless.js';
 
 const { uuidToBytes } = vless;
 
-// Same default as the Node build, so `wrangler dev` works with zero setup.
-// Anything reachable from the internet must override it with a secret.
-const DEFAULT_UUID = '7bd180e8-1142-4387-93f5-03e8d750a896';
+let warned = false;
 
-let warnedDefault = false;
+function warnOnce(message) {
+  if (warned) return;
+  warned = true;
+  console.warn(message);
+}
 
 // Derived data keyed by its own input, so caching it at module scope is safe
 // across requests in an isolate and saves 32 parseInt calls per connection.
 let cachedUuidStr = null;
 let cachedUuidBytes = null;
 
+/**
+ * The configured UUID as 16 bytes, or null when none is usable.
+ *
+ * There is deliberately no built-in default. This source is public, so any
+ * fallback baked in here would be a published credential — a Worker deployed
+ * before its secret was set would be an open proxy for anyone who read the
+ * repository. Callers must treat null as "refuse to proxy".
+ */
 export function getUuidBytes(env) {
-  let str = (env.UUID || '').trim();
+  const str = (env.UUID || '').trim();
   if (!str) {
-    str = DEFAULT_UUID;
-    if (!warnedDefault) {
-      warnedDefault = true;
-      console.warn('UUID secret is not set; falling back to the public default. Run: wrangler secret put UUID');
-    }
+    warnOnce('UUID is not configured — refusing all proxy requests. Set it with: wrangler secret put UUID');
+    return null;
   }
   if (str === cachedUuidStr) return cachedUuidBytes;
-  const bytes = uuidToBytes(str);
+
+  let bytes;
+  try {
+    bytes = uuidToBytes(str);
+  } catch {
+    warnOnce('UUID is malformed — refusing all proxy requests. Expected 32 hex digits, with or without dashes.');
+    return null;
+  }
+
   cachedUuidStr = str;
   cachedUuidBytes = bytes;
   return bytes;

@@ -150,9 +150,13 @@ The Workers build runs the same VLESS protocol on Cloudflare's edge, with no ser
 ### Deploy
 
 ```bash
-npx wrangler secret put UUID     # your VLESS UUID — do not leave the default
+npx wrangler secret put UUID     # required — the Worker proxies nothing without it
 npx wrangler deploy
 ```
+
+There is no built-in fallback UUID. Until the secret is set the Worker serves the decoy page to every request and refuses to proxy, which means a deployment that happens before its secret is configured is inert rather than an open relay. For local runs, put `UUID=...` in `.dev.vars`, which is gitignored.
+
+The Worker's `name` in `wrangler.toml` becomes its public hostname, so pick something unremarkable — it is visible to anyone who sees the URL. If you deploy from a connected Git repository, the project name in the Cloudflare dashboard must match that `name`, or the pipeline and the running Worker end up pointing at different things.
 
 Then, optionally:
 

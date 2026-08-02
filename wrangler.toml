@@ -1,4 +1,6 @@
-name = "vless-ws"
+# This becomes the public hostname: <name>.<subdomain>.workers.dev
+# Keep it uninteresting; the name is visible to anyone who sees the URL.
+name = "edge-cache"
 main = "src/worker/index.mjs"
 compatibility_date = "2025-06-01"
 
@@ -21,7 +23,10 @@ WSPATH = "/"
 # DOH_URL = "https://cloudflare-dns.com/dns-query"
 
 # UUID is the only authentication credential, so it lives in a secret rather
-# than here: npx wrangler secret put UUID
+# than here, and there is no built-in default:
+#   npx wrangler secret put UUID
+# Until it is set, the Worker serves the decoy page to every request and
+# proxies nothing. For local runs, put UUID in .dev.vars (gitignored).
 
 [observability]
 enabled = true
