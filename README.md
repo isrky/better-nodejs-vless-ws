@@ -195,7 +195,7 @@ stream {
     resolver_timeout 5s;
 
     server {
-        listen 9443;
+        listen 8443;
         ssl_preread on;
         proxy_pass $ssl_preread_server_name:443;
 
@@ -212,8 +212,8 @@ Then open the port, remembering that cloud providers usually have a second firew
 Verify from a machine *other* than the relay, so the test crosses both firewalls:
 
 ```bash
-curl -sv --resolve www.cloudflare.com:9443:<relay-ip> \
-     https://www.cloudflare.com:9443/ -o /dev/null 2>&1 | grep -E "subject:|HTTP/"
+curl -sv --resolve www.cloudflare.com:8443:<relay-ip> \
+     https://www.cloudflare.com:8443/ -o /dev/null 2>&1 | grep -E "subject:|HTTP/"
 ```
 
 Getting `CN=www.cloudflare.com` back proves the forwarding works, since that certificate can only have come from the real host. A hang or certificate mismatch usually means the missing `resolver` line.

@@ -14,7 +14,7 @@ WSPATH = "/"
 # (bare and bracketed IPv6 both work).
 #
 # Set it as a secret rather than uncommenting it here:
-#   npx wrangler secret put PROXYIP        e.g. 203.0.113.5:9443
+#   npx wrangler secret put PROXYIP        e.g. 203.0.113.5:8443
 # The code reads env.PROXYIP either way, and keeping it out of the committed
 # config avoids advertising that your relay host runs an open forwarder.
 
