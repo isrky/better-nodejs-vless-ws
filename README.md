@@ -251,7 +251,7 @@ Same as above, with these differences:
 - **Address:** `<worker>.<subdomain>.workers.dev`, or a custom domain — recommended, as `workers.dev` is blocked in several regions.
 - **Port:** `443`, **TLS:** on, with certificate verification left alone — the edge presents a publicly trusted certificate, so there is nothing to work around. `allowInsecure` no longer exists at all; see [Networks that intercept TLS](#networks-that-intercept-tls).
 - **WS Path:** `/<WSPATH>?ed=2048` — the `ed=2048` suffix enables early data, which carries the first payload in the WebSocket handshake and saves a full round trip per connection.
-- **Mux:** optional. The Worker implements Mux.Cool for TCP substreams, but plain TCP is the better-tested path.
+- **Mux:** worth enabling. `mux.concurrency: 8` reuses one WebSocket across many connections instead of paying a TLS handshake and WebSocket upgrade per connection. Measured against `-1` on the same hosts, six parallel connections dropped from 0.9–1.9s to 0.4–0.5s, and six sequential ones from ~4.9s to ~3.5s. Bulk throughput is unaffected.
 
 ### Linux Transparent Proxy (TPROXY)
 
@@ -271,7 +271,14 @@ Two details in it are deliberate and worth understanding before changing them.
 
 **DNS goes over TCP.** `dns.servers` is `tcp://1.1.1.1`, so lookups become ordinary TCP connections to `1.1.1.1:53` through the tunnel and use the Worker's plain relay. UDP DNS would work too, via the DoH path, but TCP keeps the whole thing on one well-tested code path.
 
-**UDP other than DNS is blackholed locally.** Workers has no UDP, so a `network: udp` routing rule sends the rest to a `blackhole` outbound and applications fail immediately instead of waiting on the Worker to refuse. For the same reason `mux.xudpProxyUDP443` is `reject` rather than `allow`, which makes browsers fall back to TCP for HTTP/3 straight away. `mux.concurrency` is `-1`, which disables TCP multiplexing while leaving XUDP intact.
+**UDP other than DNS is blackholed locally.** Workers has no UDP, so a `network: udp` routing rule sends the rest to a `blackhole` outbound and applications fail immediately instead of waiting on the Worker to refuse. For the same reason `mux.xudpProxyUDP443` is `reject` rather than `allow`, which makes browsers fall back to TCP for HTTP/3 straight away.
+
+**`mux.concurrency` is `-1` in the templates**, which disables TCP multiplexing while leaving XUDP intact. That is the conservative default, not the fast one — set it to `8` for a noticeably snappier tunnel, as described under [Client Configuration on Workers](#client-configuration-on-workers).
+
+> [!NOTE]
+> Until recently `-1` was the only setting that worked correctly, because the mux path had no `PROXYIP` retry: multiplexed substreams could not reach Cloudflare-hosted origins at all, so enabling mux silently broke a large share of the web while direct-dial destinations kept working. `src/worker/mux.mjs` now performs the same per-substream retry that `src/worker/relay.mjs` does. The retry is per substream rather than per connection, since one mux session carries many destinations at once.
+>
+> Note that several *simultaneous* large downloads can still fail with `unexpected eof`. That behaviour is identical with mux on and off, so it is a property of the tunnel rather than of multiplexing.
 
 The `listen`/`port`/`sockopt.mark` values are specific to your nftables or iptables TPROXY rules and will need adjusting to match them.
 

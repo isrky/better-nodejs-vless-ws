@@ -1,6 +1,8 @@
 import { connect } from 'cloudflare:sockets';
 import vless from '../vless.js';
+import { getProxyIp } from './config.mjs';
 import { dohQuery } from './dns.mjs';
+import { splitProxy } from './relay.mjs';
 import { WS_OPEN, ignoreRejection, safeClose, safeSend } from './wsstream.mjs';
 
 const { ByteQueue, VLESS_OK_HEADER, isBlockedDomain, parseMuxAddress } = vless;
@@ -145,7 +147,13 @@ class MuxSession {
     }
 
     if (network === 1) {
-      const stream = { kind: 'tcp', socket: null, writer: null, chain: null, closed: false };
+      // host/port and the opening bytes are retained so the substream can be
+      // re-dialled through PROXYIP, exactly as the non-mux path does.
+      const stream = {
+        kind: 'tcp', socket: null, writer: null, chain: null, closed: false,
+        host: addr.host, port, initial: data,
+        sawData: false, wroteMore: false, retried: false
+      };
       this.streams.set(id, stream);
       stream.chain = this.track(this.openTcp(id, stream, addr.host, port, data));
       return;
@@ -181,6 +189,7 @@ class MuxSession {
       // Not awaited: the write chain must not block on the read pump.
       this.track(this.pumpTcp(id, stream));
     } catch {
+      if (await this.retryViaProxy(id, stream)) return;
       this.sendEnd(id);
       this.endStream(id);
     }
@@ -191,13 +200,55 @@ class MuxSession {
       await stream.socket.readable.pipeTo(new WritableStream({
         write: (chunk) => {
           if (this.closed || this.ws.readyState !== WS_OPEN) throw new Error('websocket closed');
+          if (!stream.sawData) {
+            stream.sawData = true;
+            // No retry can happen now, so stop pinning the opening bytes.
+            stream.initial = null;
+          }
           this.sendKeep(id, chunk);
         }
       }));
     } catch {}
-    if (!stream.closed) {
-      this.sendEnd(id);
-      this.endStream(id);
+    if (stream.closed) return;
+    if (await this.retryViaProxy(id, stream)) return;
+    this.sendEnd(id);
+    this.endStream(id);
+  }
+
+  /**
+   * A substream whose dial failed, or which connected but produced nothing, is
+   * the signature of a Cloudflare-proxied origin: Workers refuse to connect
+   * back into Cloudflare's own edge on 80/443. Re-dial through the relay and
+   * replay the opening bytes, per substream — one mux session carries many
+   * destinations, and only the affected substream may be swapped.
+   */
+  async retryViaProxy(id, stream) {
+    if (stream.sawData || stream.wroteMore || stream.retried) return false;
+    if (stream.closed || this.closed) return false;
+    const proxyIp = getProxyIp(this.env);
+    if (!proxyIp) return false;
+    stream.retried = true;
+
+    const target = splitProxy(proxyIp, stream.port);
+    try {
+      const socket = connect({ hostname: target.hostname, port: target.port });
+      await socket.opened;
+      if (stream.closed || this.closed) {
+        ignoreRejection(socket.close());
+        return false;
+      }
+      const previous = stream.socket;
+      stream.socket = socket;
+      stream.writer = socket.writable.getWriter();
+      if (previous) ignoreRejection(previous.close());
+      if (stream.initial) {
+        await stream.writer.ready;
+        await stream.writer.write(stream.initial);
+      }
+      this.track(this.pumpTcp(id, stream));
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -223,6 +274,11 @@ class MuxSession {
     if (!stream || stream.closed) return;
 
     if (stream.kind === 'tcp') {
+      // Past this point the retry can no longer reproduce the conversation
+      // faithfully: it replays only the opening bytes, so anything sent after
+      // them would be lost. Record that and let retryViaProxy decline.
+      stream.wroteMore = true;
+      stream.initial = null;
       // Per-substream serialization. Without it, one slow origin would
       // head-of-line-block every other substream sharing this WebSocket.
       stream.chain = this.track(stream.chain.then(async () => {

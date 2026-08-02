@@ -17,7 +17,7 @@ async function dial(hostname, port) {
  * PROXYIP is either "host" (reuse the original destination port) or
  * "host:port". Bracketed IPv6 literals are supported.
  */
-function splitProxy(proxyIp, fallbackPort) {
+export function splitProxy(proxyIp, fallbackPort) {
   const m = /^\[(.+)\](?::(\d+))?$/.exec(proxyIp);
   if (m) return { hostname: m[1], port: m[2] ? parseInt(m[2], 10) : fallbackPort };
   const idx = proxyIp.lastIndexOf(':');
