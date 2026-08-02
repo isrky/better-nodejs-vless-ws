@@ -63,8 +63,7 @@
         "network": "ws",
         "security": "tls",
         "tlsSettings": {
-          "serverName": "<worker>.<subdomain>.workers.dev",
-          "allowInsecure": false
+          "serverName": "<worker>.<subdomain>.workers.dev"
         },
         "wsSettings": {
           "path": "/<your-wspath>?ed=2048",
