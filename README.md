@@ -230,7 +230,14 @@ curl -sv --resolve www.cloudflare.com:8443:<relay-ip> \
      https://www.cloudflare.com:8443/ -o /dev/null 2>&1 | grep -E "subject:|HTTP/"
 ```
 
-Getting `CN=www.cloudflare.com` back proves the forwarding works, since that certificate can only have come from the real host. A hang or certificate mismatch usually means the missing `resolver` line.
+Getting `CN=www.cloudflare.com` back proves the forwarding works, since that certificate can only have come from the real host. A hang usually means the missing `resolver` line.
+
+Getting **the relay's own certificate** back means something different and more serious: the port is being served by a `server {}` block inside `http {}` instead of by the `stream {}` block, so the relay is terminating TLS and impersonating every destination. On a host that already runs a web stack — YunoHost, Plesk, stock nginx with a default vhost — this is the usual outcome of reusing port 443, because that port already belongs to the existing site. Give the forwarder a port of its own.
+
+The symptom seen from a client is distinctive and easy to misread: destinations the Worker can dial directly keep working normally, while everything that falls back through `PROXYIP` returns one wrong certificate belonging to the relay host. It looks like a client TLS problem and is not.
+
+> [!CAUTION]
+> Do not "fix" this by trusting or pinning that certificate. `tlsSettings` governs the outer client-to-Worker connection; the certificate you are seeing belongs to the inner end-to-end session, which the tunnel is supposed to carry untouched and which Xray never parses. There is no setting that reaches it, and accepting it would mean authorising a man-in-the-middle on every site reached through the relay. Fix the relay so it forwards without terminating.
 
 > [!WARNING]
 > As written this is an **open relay** — anyone who finds the port can bounce TLS through it, and it will be scanned. Since the only legitimate client is your Worker, restrict the source at the cloud firewall to Cloudflare's published IP ranges once you have confirmed it works end to end.
@@ -242,13 +249,23 @@ Finally, if the relay's hostname is on Cloudflare DNS, it must be **DNS-only** (
 Same as above, with these differences:
 
 - **Address:** `<worker>.<subdomain>.workers.dev`, or a custom domain — recommended, as `workers.dev` is blocked in several regions.
-- **Port:** `443`, **TLS:** on, **allowInsecure:** off (there is no self-signed certificate any more).
+- **Port:** `443`, **TLS:** on, with certificate verification left alone — the edge presents a publicly trusted certificate, so there is nothing to work around. `allowInsecure` no longer exists at all; see [Networks that intercept TLS](#networks-that-intercept-tls).
 - **WS Path:** `/<WSPATH>?ed=2048` — the `ed=2048` suffix enables early data, which carries the first payload in the WebSocket handshake and saves a full round trip per connection.
 - **Mux:** optional. The Worker implements Mux.Cool for TCP substreams, but plain TCP is the better-tested path.
 
 ### Linux Transparent Proxy (TPROXY)
 
-[`examples/xray-tproxy-client.json`](examples/xray-tproxy-client.json) is a complete Xray-core client config for a system-wide transparent proxy. Copy it, replace the four `<...>` placeholders, and keep your working copy out of version control — `conf.json` is gitignored for exactly this purpose, since it ends up holding your UUID.
+[`conf.json`](conf.json) is a complete Xray-core client config for a system-wide transparent proxy, and [`conf-android.json`](conf-android.json) is its counterpart for a phone — a local SOCKS inbound instead of TPROXY, plus the extras a filtered mobile network needs.
+
+Both are templates. Every secret in them is a `<...>` placeholder, and the three host fields deliberately share one token, because `serverName`, `wsSettings.host` and the outbound address must all be identical. Copy the one you need into `local/`, which is gitignored, and fill in your own values there:
+
+```bash
+cp conf-android.json local/
+$EDITOR local/conf-android.json
+xray run -c local/conf-android.json
+```
+
+Keeping the working copy in `local/` rather than editing the template in place is what stops a real UUID and WSPATH reaching a commit.
 
 Two details in it are deliberate and worth understanding before changing them.
 
@@ -275,6 +292,48 @@ If `workers.dev` resolves to slow edge IPs from your network, you can dial a spe
 
 Do not carry a `pinnedPeerCertSha256` over from a self-hosted setup. It pins one specific certificate, and Cloudflare presents its own and rotates it, so the handshake fails within weeks at best.
 
+### Networks that intercept TLS
+
+Some networks — corporate, school, and national filters — terminate every TLS connection on a middlebox and re-sign it with their own root CA. Two consequences shape the whole config:
+
+- **HTTP/2 stops working**, because interception forces traffic back to HTTP/1.1. WebSocket is what survives, which is why this transport is the right choice here even though Xray now prints `WebSocket transport … is deprecated, migrate to XHTTP H2 & H3` on startup. **Ignore that warning on such a network.** H2 is precisely what the middlebox breaks, and H3 is QUIC over UDP, which these networks generally block outside ports 53 and 123. Do not "migrate" and expect it to keep working.
+- **The certificate your client sees is not Cloudflare's.** You have to trust the interception CA, or the handshake fails.
+
+Add the CA to `tlsSettings.certificates` rather than installing it system-wide. [`conf-android.json`](conf-android.json) is set up this way already, with the certificate itself left as a placeholder for you to paste over:
+
+```json
+"tlsSettings": {
+  "serverName": "<your-host>",
+  "certificates": [
+    { "usage": "verify", "certificate": ["-----BEGIN CERTIFICATE-----", "…", "-----END CERTIFICATE-----"] }
+  ]
+}
+```
+
+This **adds** to the system trust store rather than replacing it — `disableSystemRoot` defaults to `false` — so ordinary public certificates still validate. On Android this is not merely tidier but required: Go reads only `/system/etc/security/cacerts`, so a CA you install through Settings is invisible to Xray.
+
+Note that forgetting to replace the placeholder is not caught by `xray run -test`. Xray ignores PEM it cannot parse rather than rejecting the config, so the certificate is simply never added to the pool. That fails closed rather than open — verification still runs against the public roots — but it surfaces as an `x509` error when you connect, not when you validate. If a config that tests clean fails to handshake on an intercepting network, check the certificate block first.
+
+Two caveats. On **Windows** a CA supplied this way is silently ignored unless you also set `disableSystemRoot: true`, which then drops the public roots; import it into the Windows certificate store instead. And `alpn` should be **left unset** — Xray's WebSocket dialer already pins `http/1.1`, so setting it explicitly does nothing and setting `["h2","http/1.1"]` will break the upgrade.
+
+> [!IMPORTANT]
+> **`allowInsecure` was removed in Xray v26.2.6** and stopped working entirely on 2026-06-01. A config still carrying it does not warn — it refuses to start:
+> `The feature "allowInsecure" has been removed and migrated to "pinnedPeerCertSha256".`
+>
+> Trusting the interception CA as above is the correct replacement. If the middlebox's re-signed certificate turns out to carry no matching SAN, use `verifyPeerCertByName`, which takes a **string, not an array** (the published documentation has this wrong):
+>
+> ```json
+> "verifyPeerCertByName": "your-host.example.com"
+> ```
+>
+> Reach for `pinnedPeerCertSha256` only as a last resort — pinning against Cloudflare breaks on every certificate rotation, roughly quarterly.
+
+Finally, if the network is IPv4-only — common behind such filters — an AAAA answer will strand the client, since `workers.dev` and Cloudflare custom domains publish both A and AAAA. Force the address family on the outbound:
+
+```json
+"sockopt": { "domainStrategy": "UseIPv4" }
+```
+
 ### Other Workers Limits
 
 - **Free plan allows 50 subrequests per request.** Only DNS consumes these, and answers are cached at the edge to stay well under it.
@@ -288,7 +347,9 @@ Do not carry a `pinnedPeerCertSha256` over from a self-hosted setup. It pins one
 
 ```
 appws.js              # Node.js server (single file)
-examples/             # client configuration templates
+conf.json             # client template: Linux system-wide TPROXY
+conf-android.json     # client template: Android / local SOCKS
+local/                # your filled-in copies (gitignored)
 src/vless.js          # VLESS parser + byte queue, shared by both builds
 src/worker/           # Cloudflare Workers build
   index.mjs           #   fetch entry: routing, handshake, header parse

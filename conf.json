@@ -48,7 +48,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "<worker>.<subdomain>.workers.dev",
+            "address": "<your-host>",
             "port": 443,
             "users": [
               {
@@ -63,12 +63,21 @@
         "network": "ws",
         "security": "tls",
         "tlsSettings": {
-          "serverName": "<worker>.<subdomain>.workers.dev",
-          "allowInsecure": false
+          "serverName": "<your-host>",
+          "certificates": [
+            {
+              "usage": "verify",
+              "certificate": [
+                "-----BEGIN CERTIFICATE-----",
+                "<your network's TLS-interception CA, base64 lines>",
+                "-----END CERTIFICATE-----"
+              ]
+            }
+          ]
         },
         "wsSettings": {
           "path": "/<your-wspath>?ed=2048",
-          "host": "<worker>.<subdomain>.workers.dev"
+          "host": "<your-host>"
         },
         "sockopt": {
           "mark": 2
