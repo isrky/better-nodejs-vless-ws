@@ -1,3 +1,7 @@
 node_modules/
 .wrangler/
 .dev.vars
+
+# Local client config: holds a real UUID and endpoint.
+# The committed template lives in examples/xray-tproxy-client.json.
+conf.json

@@ -244,6 +244,24 @@ Same as above, with these differences:
 - **Address:** `<worker>.<subdomain>.workers.dev`, or a custom domain — recommended, as `workers.dev` is blocked in several regions.
 - **Port:** `443`, **TLS:** on, **allowInsecure:** off (there is no self-signed certificate any more).
 - **WS Path:** `/<WSPATH>?ed=2048` — the `ed=2048` suffix enables early data, which carries the first payload in the WebSocket handshake and saves a full round trip per connection.
+- **Mux:** optional. The Worker implements Mux.Cool for TCP substreams, but plain TCP is the better-tested path.
+
+### Linux Transparent Proxy (TPROXY)
+
+[`examples/xray-tproxy-client.json`](examples/xray-tproxy-client.json) is a complete Xray-core client config for a system-wide transparent proxy. Copy it, replace the four `<...>` placeholders, and keep your working copy out of version control — `conf.json` is gitignored for exactly this purpose, since it ends up holding your UUID.
+
+Two details in it are deliberate and worth understanding before changing them.
+
+**DNS goes over TCP.** `dns.servers` is `tcp://1.1.1.1`, so lookups become ordinary TCP connections to `1.1.1.1:53` through the tunnel and use the Worker's plain relay. UDP DNS would work too, via the DoH path, but TCP keeps the whole thing on one well-tested code path.
+
+**UDP other than DNS is blackholed locally.** Workers has no UDP, so a `network: udp` routing rule sends the rest to a `blackhole` outbound and applications fail immediately instead of waiting on the Worker to refuse. For the same reason `mux.xudpProxyUDP443` is `reject` rather than `allow`, which makes browsers fall back to TCP for HTTP/3 straight away. `mux.concurrency` is `-1`, which disables TCP multiplexing while leaving XUDP intact.
+
+The `listen`/`port`/`sockopt.mark` values are specific to your nftables or iptables TPROXY rules and will need adjusting to match them.
+
+> [!TIP]
+> If your `serverName` differs from the hostname in `wsSettings.host` — an SNI-fronting arrangement — expect Cloudflare to reject it. The edge terminates TLS by SNI and then routes by the `Host` header, refusing requests where the two disagree. Set both to your own hostname; if SNI-based blocking is the problem you are solving, a custom domain on Cloudflare is the fix, since it gives you an unblocked name that legitimately matches both.
+
+Do not carry a `pinnedPeerCertSha256` over from a self-hosted setup. It pins one specific certificate, and Cloudflare presents its own and rotates it, so the handshake fails within weeks at best.
 
 ### Other Workers Limits
 
@@ -258,6 +276,7 @@ Same as above, with these differences:
 
 ```
 appws.js              # Node.js server (single file)
+examples/             # client configuration templates
 src/vless.js          # VLESS parser + byte queue, shared by both builds
 src/worker/           # Cloudflare Workers build
   index.mjs           #   fetch entry: routing, handshake, header parse

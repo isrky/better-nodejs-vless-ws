@@ -1,0 +1,93 @@
+{
+  "dns": {
+    "tag": "dns-inbound",
+    "servers": [
+      "tcp://1.1.1.1"
+    ]
+  },
+  "routing": {
+    "rules": [
+      {
+        "inboundTag": [
+          "dns-inbound"
+        ],
+        "outboundTag": "vless"
+      },
+      {
+        "network": "tcp,udp",
+        "port": "53",
+        "outboundTag": "dns-outbound"
+      },
+      {
+        "network": "udp",
+        "outboundTag": "block"
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "tag": "tproxy-in",
+      "listen": "127.0.0.1",
+      "port": 12345,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "network": "tcp,udp",
+        "followRedirect": true
+      },
+      "streamSettings": {
+        "sockopt": {
+          "tproxy": "tproxy"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "vless",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "<worker>.<subdomain>.workers.dev",
+            "port": 443,
+            "users": [
+              {
+                "id": "<your-uuid>",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "<worker>.<subdomain>.workers.dev",
+          "allowInsecure": false
+        },
+        "wsSettings": {
+          "path": "/<your-wspath>?ed=2048",
+          "host": "<worker>.<subdomain>.workers.dev"
+        },
+        "sockopt": {
+          "mark": 2
+        }
+      },
+      "mux": {
+        "enabled": true,
+        "concurrency": -1,
+        "xudpConcurrency": 1024,
+        "xudpProxyUDP443": "reject"
+      }
+    },
+    {
+      "tag": "dns-outbound",
+      "protocol": "dns"
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    }
+  ]
+}
