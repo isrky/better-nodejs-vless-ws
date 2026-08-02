@@ -6,11 +6,16 @@ const dgram = require('dgram');
 const dns = require('dns');
 const crypto = require('crypto');
 
+// Protocol logic shared with the Cloudflare Workers build (src/worker/).
+// It is written against Uint8Array, and Buffer is a Uint8Array subclass, so
+// the same functions serve both runtimes.
+const { isBlockedDomain, parseVlessHeader, uuidToBytes } = require('./src/vless.js');
+
 // ==========================================
 // Environment & Configuration
 // ==========================================
 const UUID = process.env.UUID || '7bd180e8-1142-4387-93f5-03e8d750a896';
-const TARGET_UUID_BYTES = Buffer.from(UUID.replace(/-/g, ''), 'hex');
+const TARGET_UUID_BYTES = uuidToBytes(UUID);
 
 const WSPATH = process.env.WSPATH || '/';
 const PORT = parseInt(process.env.SERVER_PORT || process.env.PORT || '3000', 10);
@@ -74,11 +79,6 @@ kShRo16nOL+9eQHMEa3E91Vt
 -----END PRIVATE KEY-----`;
 
 const tlsCreds = { cert: SELF_SIGNED_CERT, key: SELF_SIGNED_KEY };
-
-const BLOCKED_DOMAINS = [
-  'speedtest.net', 'fast.com', 'speedtest.cn', 'speed.cloudflare.com', 'speedof.me',
-  'testmy.net', 'bandwidth.place', 'speed.io', 'librespeed.org', 'speedcheck.org'
-];
 
 // ==========================================
 // GLOBAL STATISTICS (Lockless via single thread)
@@ -609,15 +609,6 @@ function log(level, msg) {
   console.log(`[${timeStr}][${level}] ${msg}`);
 }
 
-function isBlockedDomain(host) {
-  if (!host) return false;
-  const hl = host.toLowerCase();
-  for (const blocked of BLOCKED_DOMAINS) {
-    if (hl === blocked || hl.endsWith('.' + blocked)) return true;
-  }
-  return false;
-}
-
 // ==========================================
 // DNS CACHE & QUEUE LOGIC
 // ==========================================
@@ -1053,62 +1044,13 @@ function handleConnection(client) {
     return client.write(wsCodec.sendMux(2, meta, hasData, payload));
   }
 
+  // Thin adapter over the shared parser, keeping this file's tuple convention:
+  // null = need more bytes, [false, reason] = reject, [true, cmd, host, port, headerEnd] = ok.
   function tryParseVls(payload) {
-    if (payload.length < 18) return null;
-    if (payload[0] !== 0) return [false, 'Bad Version'];
-    // compare 16 bytes UUID
-    for (let i = 0; i < 16; i++) {
-      if (payload[1 + i] !== TARGET_UUID_BYTES[i]) return [false, 'UUID Mismatch'];
-    }
-
-    const optLen = payload[17];
-    let pos = 18 + optLen;
-    if (payload.length < pos) return null;
-
-    const cmd = payload[pos];
-    pos += 1;
-
-    if (cmd === 3) {
-      return [true, cmd, '0.0.0.0', 0, pos];
-    }
-
-    if (payload.length < pos + 3) return null;
-    const parsedPort = (payload[pos] << 8) | payload[pos + 1];
-    pos += 2;
-
-    const atyp = payload[pos];
-    pos += 1;
-    let parsedHost = '';
-
-    if (atyp === 0x01) {
-      if (payload.length < pos + 4) return null;
-      parsedHost = `${payload[pos]}.${payload[pos+1]}.${payload[pos+2]}.${payload[pos+3]}`;
-      pos += 4;
-    } else if (atyp === 0x02) {
-      if (payload.length < pos) return null;
-      const hlen = payload[pos];
-      pos += 1;
-      if (payload.length < pos + hlen) return null;
-      parsedHost = payload.toString('utf8', pos, pos + hlen);
-      pos += hlen;
-    } else if (atyp === 0x03) {
-      if (payload.length < pos + 16) return null;
-      const parts = [];
-      for (let j = 0; j < 8; j++) {
-        parts.push(((payload[pos + j*2] << 8) | payload[pos + j*2 + 1]).toString(16));
-      }
-      parsedHost = parts.join(':');
-      pos += 16;
-    } else if (atyp === 0x00) {
-      parsedHost = '0.0.0.0';
-    } else {
-      return [false, `Unknown ATYP: ${atyp}`];
-    }
-
-    if (isBlockedDomain(parsedHost)) return [false, 'Blocked Domain: ' + parsedHost];
-    if (cmd !== 1 && cmd !== 2) return [false, `Unknown Command: ${cmd}`];
-
-    return [true, cmd, parsedHost, parsedPort, pos];
+    const r = parseVlessHeader(payload, TARGET_UUID_BYTES);
+    if (r.status === 'need') return null;
+    if (r.status === 'fail') return [false, r.reason];
+    return [true, r.cmd, r.host, r.port, r.headerEnd];
   }
 
   function processWsUdp(data) {

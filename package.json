@@ -5,11 +5,21 @@
   "main": "appws.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node appws.js"
+    "start": "node appws.js",
+    "dev": "wrangler dev --remote",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
   },
   "author": "cocaococao",
   "license": "GPL-3.0-or-later",
   "engines": {
     "node": ">16.0.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260730.1": true
   }
 }

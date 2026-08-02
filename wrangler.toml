@@ -1,0 +1,27 @@
+name = "vless-ws"
+main = "src/worker/index.mjs"
+compatibility_date = "2025-06-01"
+
+# No compatibility_flags on purpose: the Worker is Buffer-free, so skipping
+# nodejs_compat keeps the bundle small and cold starts fast.
+
+[vars]
+WSPATH = "/"
+
+# PROXYIP is close to mandatory in practice — Workers cannot open a TCP
+# connection back into Cloudflare's own edge, so destinations behind Cloudflare
+# fail without a relay host to retry through. Accepts "host" or "host:port"
+# (bare and bracketed IPv6 both work).
+#
+# Set it as a secret rather than uncommenting it here:
+#   npx wrangler secret put PROXYIP        e.g. 203.0.113.5:9443
+# The code reads env.PROXYIP either way, and keeping it out of the committed
+# config avoids advertising that your relay host runs an open forwarder.
+
+# DOH_URL = "https://cloudflare-dns.com/dns-query"
+
+# UUID is the only authentication credential, so it lives in a secret rather
+# than here: npx wrangler secret put UUID
+
+[observability]
+enabled = true
