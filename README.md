@@ -251,7 +251,7 @@ Same as above, with these differences:
 - **Address:** `<worker>.<subdomain>.workers.dev`, or a custom domain — recommended, as `workers.dev` is blocked in several regions.
 - **Port:** `443`, **TLS:** on, with certificate verification left alone — the edge presents a publicly trusted certificate, so there is nothing to work around. `allowInsecure` no longer exists at all; see [Networks that intercept TLS](#networks-that-intercept-tls).
 - **WS Path:** `/<WSPATH>?ed=2048` — the `ed=2048` suffix enables early data, which carries the first payload in the WebSocket handshake and saves a full round trip per connection.
-- **Mux:** worth enabling. `mux.concurrency: 8` reuses one WebSocket across many connections instead of paying a TLS handshake and WebSocket upgrade per connection. Measured against `-1` on the same hosts, six parallel connections dropped from 0.9–1.9s to 0.4–0.5s, and six sequential ones from ~4.9s to ~3.5s. Bulk throughput is unaffected.
+- **Mux:** depends on your plan. `mux.concurrency: 8` reuses one WebSocket across many connections instead of paying a TLS handshake and WebSocket upgrade per connection. Measured against `-1` on the same hosts, six parallel connections dropped from 0.9–1.9s to 0.4–0.5s, and six sequential ones from ~4.9s to ~3.5s, with bulk throughput unaffected. **Enable it on Workers Paid.** On the Free plan leave it at `-1` — see [CPU time is the binding limit](#cpu-time-is-the-binding-limit-on-the-free-plan).
 
 ### Linux Transparent Proxy (TPROXY)
 
@@ -273,7 +273,11 @@ Two details in it are deliberate and worth understanding before changing them.
 
 **UDP other than DNS is blackholed locally.** Workers has no UDP, so a `network: udp` routing rule sends the rest to a `blackhole` outbound and applications fail immediately instead of waiting on the Worker to refuse. For the same reason `mux.xudpProxyUDP443` is `reject` rather than `allow`, which makes browsers fall back to TCP for HTTP/3 straight away.
 
-**`mux.concurrency` is `-1` in the templates**, which disables TCP multiplexing while leaving XUDP intact. That is the conservative default, not the fast one — set it to `8` for a noticeably snappier tunnel, as described under [Client Configuration on Workers](#client-configuration-on-workers).
+**`mux.concurrency` is `-1` in the templates**, which disables TCP multiplexing while leaving XUDP intact. That is the conservative default, chosen because it is the correct one on the Free plan — not because it is the faster one.
+
+Multiplexing is a real latency win but it is not free. Measured over the same workload, mux used roughly **twice the total CPU** of the plain relay (767 ms and 791 ms across two runs, against 399 ms) and — worse for the Free plan — concentrated all of it into **one** invocation rather than spreading it over 54, since a single WebSocket carries every connection. Against a 10 ms per-invocation budget that is fatal. Against 30 s on Paid it is irrelevant, and mux also *reduces* request count, because one upgrade serves up to eight connections.
+
+So: set it to `8` on Workers Paid, leave it at `-1` on Free.
 
 > [!NOTE]
 > Until recently `-1` was the only setting that worked correctly, because the mux path had no `PROXYIP` retry: multiplexed substreams could not reach Cloudflare-hosted origins at all, so enabling mux silently broke a large share of the web while direct-dial destinations kept working. `src/worker/mux.mjs` now performs the same per-substream retry that `src/worker/relay.mjs` does. The retry is per substream rather than per connection, since one mux session carries many destinations at once.
@@ -343,10 +347,24 @@ Finally, if the network is IPv4-only — common behind such filters — an AAAA 
 
 ### Other Workers Limits
 
-- **Free plan allows 50 subrequests per request.** Only DNS consumes these, and answers are cached at the edge to stay well under it.
+- **Free plan allows 50 subrequests per request**, against 10,000 on Paid. Only DNS consumes these, and answers are cached at the edge to stay well under it.
 - **WebSocket messages are capped at 1 MiB** in both directions.
 - **Every `wrangler deploy` drops all live connections.**
-- CPU limits are not a concern: the relay is I/O-bound, and I/O wait does not count against them.
+
+### CPU time is the binding limit on the Free plan
+
+It is tempting to assume a relay is I/O-bound and therefore cheap. Waiting on the network genuinely does not count against CPU time — but *moving bytes does*, and the Free plan allows only **10 ms of CPU per invocation** against **30 s** on Paid (raisable to 5 minutes).
+
+Measured on a deployed Worker with `wrangler tail --format json`:
+
+| Path | CPU per MB | What fits in 10 ms |
+|---|---|---|
+| Plain relay (`mux.concurrency: -1`) | ~12.6 ms/MB | ~800 KB |
+| Mux (`mux.concurrency: 8`) | ~40 ms/MB | ~250 KB |
+
+On the Free plan this is what a large transfer failing actually looks like: a download that stalls for a couple of minutes and returns nothing, `SSL_read: unexpected eof` when several transfers run at once, or connections that succeed intermittently for no visible reason. Those are CPU exhaustion, not network faults — confirm with `exceededCpu` outcomes in `wrangler tail` before hunting elsewhere.
+
+There is no way to code around a 12–40× shortfall. **Workers Paid is the fix**, and since billing is on CPU rather than wall-clock duration, an idle long-lived tunnel costs essentially nothing; the $5/month includes 10M requests and 30M CPU-ms, which at these rates is several hundred GB of traffic.
 
 ---
 
