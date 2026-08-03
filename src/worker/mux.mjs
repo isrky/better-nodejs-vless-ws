@@ -95,10 +95,13 @@ class MuxSession {
   drain() {
     for (;;) {
       if (this.closed) return;
-      const buf = this.queue.flatten();
-      if (buf.length < 4) return;
+      // Read the header in place. flatten() would merge every pending part on
+      // each pass, so a frame spread across several WebSocket messages would be
+      // re-copied once per message.
+      const queue = this.queue;
+      if (queue.size < 4) return;
 
-      const metaLen = (buf[0] << 8) | buf[1];
+      const metaLen = (queue.at(0) << 8) | queue.at(1);
       if (metaLen < 4) {
         // A desynced mux stream cannot be resynced meaningfully; tear it down.
         console.log('mux: invalid metaLen ' + metaLen + ', closing session');
@@ -106,24 +109,25 @@ class MuxSession {
         safeClose(this.ws, 1002, 'mux desync');
         return;
       }
-      if (buf.length < 2 + metaLen) return;
+      if (queue.size < 2 + metaLen) return;
 
-      const hasData = (buf[5] & 1) === 1;
+      // Safe because metaLen >= 4 was enforced above, so size >= 6 here.
+      const hasData = (queue.at(5) & 1) === 1;
       let dataLen = 0;
       if (hasData) {
-        if (buf.length < 4 + metaLen) return;
-        dataLen = (buf[2 + metaLen] << 8) | buf[3 + metaLen];
-        if (buf.length < 4 + metaLen + dataLen) return;
+        if (queue.size < 4 + metaLen) return;
+        dataLen = (queue.at(2 + metaLen) << 8) | queue.at(3 + metaLen);
+        if (queue.size < 4 + metaLen + dataLen) return;
       }
 
       // Copy before consuming: the handlers below are async and consume()
       // re-slices the backing store out from under any lingering view.
-      const meta = buf.slice(2, 2 + metaLen);
+      const meta = queue.slice(2, 2 + metaLen);
       const data = hasData && dataLen > 0
-        ? buf.slice(4 + metaLen, 4 + metaLen + dataLen)
+        ? queue.slice(4 + metaLen, 4 + metaLen + dataLen)
         : null;
 
-      this.queue.consume(2 + metaLen + (hasData ? 2 + dataLen : 0));
+      queue.consume(2 + metaLen + (hasData ? 2 + dataLen : 0));
 
       const id = (meta[0] << 8) | meta[1];
       const cmd = meta[2];
