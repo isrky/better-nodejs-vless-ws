@@ -83,12 +83,11 @@ export async function runDnsRelay(ws, readable, port, initial, env, ctx) {
 
   const drain = () => {
     for (;;) {
-      const buf = queue.flatten();
-      if (buf.length < 2) return;
-      const len = (buf[0] << 8) | buf[1];
-      if (buf.length < 2 + len) return;
-      // slice, not subarray: consume() may re-slice the backing store.
-      const packet = buf.slice(2, 2 + len);
+      if (queue.size < 2) return;
+      const len = (queue.at(0) << 8) | queue.at(1);
+      if (queue.size < 2 + len) return;
+      // A copy, not a view: consume() below re-slices the backing store.
+      const packet = queue.slice(2, 2 + len);
       queue.consume(2 + len);
       // Deliberately not awaited so queries resolve in parallel. JS is
       // single-threaded, so the `header` check inside reply() stays race-free.

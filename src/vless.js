@@ -162,6 +162,50 @@ class ByteQueue {
     this.size += chunk.byteLength;
   }
 
+  /**
+   * Byte at absolute index i, without merging the parts.
+   *
+   * Frame parsers only need a handful of header bytes before they know how far
+   * to slice, so reading them in place avoids flatten()'s copy of everything
+   * still pending — which would otherwise be repaid on every chunk that
+   * arrives while a frame is still incomplete.
+   */
+  at(i) {
+    if (i < 0 || i >= this.size) return undefined;
+    for (let p = 0; p < this.parts.length; p++) {
+      const part = this.parts[p];
+      if (i < part.byteLength) return part[i];
+      i -= part.byteLength;
+    }
+    return undefined;
+  }
+
+  /** Copy of [start, end), assembled across part boundaries. */
+  slice(start, end) {
+    if (end === undefined || end > this.size) end = this.size;
+    if (start < 0) start = 0;
+    if (end <= start) return EMPTY;
+
+    const out = new Uint8Array(end - start);
+    let offset = 0;
+    let skip = start;
+    let remaining = end - start;
+
+    for (let p = 0; p < this.parts.length && remaining > 0; p++) {
+      const part = this.parts[p];
+      if (skip >= part.byteLength) {
+        skip -= part.byteLength;
+        continue;
+      }
+      const take = Math.min(part.byteLength - skip, remaining);
+      out.set(part.subarray(skip, skip + take), offset);
+      offset += take;
+      remaining -= take;
+      skip = 0;
+    }
+    return out;
+  }
+
   /** Contiguous view of everything queued. */
   flatten() {
     if (this.size === 0) return EMPTY;
