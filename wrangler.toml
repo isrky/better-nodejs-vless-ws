@@ -1,8 +1,12 @@
-# This becomes the public hostname: <name>.<subdomain>.workers.dev
-# Keep it uninteresting; the name is visible to anyone who sees the URL.
+# The name is visible to anyone who sees the URL, so keep it uninteresting.
 name = "static-cache"
 main = "src/worker/index.mjs"
 compatibility_date = "2025-06-01"
+
+# Do not publish the free <name>.<subdomain>.workers.dev hostname. A public
+# workers.dev URL is how proxy Workers get discovered and flagged; reach this
+# Worker only through the custom domain bound in the dashboard.
+workers_dev = false
 
 # No compatibility_flags on purpose: the Worker is Buffer-free, so skipping
 # nodejs_compat keeps the bundle small and cold starts fast.
