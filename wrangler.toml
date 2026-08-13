@@ -5,8 +5,15 @@ compatibility_date = "2025-06-01"
 
 # Do not publish the free <name>.<subdomain>.workers.dev hostname. A public
 # workers.dev URL is how proxy Workers get discovered and flagged; reach this
-# Worker only through the custom domain bound in the dashboard.
+# Worker only through the custom domain below.
 workers_dev = false
+
+# Bind the Worker to a custom domain on the isrky.dev zone. custom_domain = true
+# makes Cloudflare provision the DNS record and TLS cert and route 100% of the
+# hostname's traffic to this Worker, so no manual dashboard step is needed.
+routes = [
+  { pattern = "assets.isrky.dev", custom_domain = true }
+]
 
 # No compatibility_flags on purpose: the Worker is Buffer-free, so skipping
 # nodejs_compat keeps the bundle small and cold starts fast.
