@@ -81,6 +81,7 @@ The configuration is done through environment variables.
 | `UUID` | `7bd180e8-...` | VLESS authentication UUID |
 | `WSPATH` | First 8 chars of UUID (can be changed through variables) | WebSocket path prefix |
 | `PORT` / `SERVER_PORT` | `3000` | Listening port |
+| `ADMIN_TOKEN` | *(unset)* | Gate for `/admin-stats`. Unset → the page is hidden (serves the decoy). Set → requires `?token=<ADMIN_TOKEN>`. |
 
 **Example:**
 
@@ -128,18 +129,33 @@ location /yourpath {
 
 ---
 
+## Deploy with Docker / Fly.io
+
+The Node build has zero npm dependencies, so the image is tiny. A `Dockerfile` and `fly.toml` are included. Fly's edge terminates TLS and forwards plaintext WS to the container (`appws.js` auto-detects plaintext), so no reverse proxy of your own is needed — this is the plug-and-play alternative to a self-managed VPS, and unlike Cloudflare Workers it carries **UDP** (games, voice).
+
+```bash
+fly launch --no-deploy                 # adopts the committed fly.toml
+fly secrets set UUID=<uuid> WSPATH=/<wspath> ADMIN_TOKEN=<token>
+fly deploy
+fly certs add sub.yourdomain.com       # then add the DNS records Fly prints
+```
+
+The same `Dockerfile` runs on Koyeb/Railway/Render if you prefer their free tiers. Because these forward every path (not just `/<WSPATH>`), set `ADMIN_TOKEN` so `/admin-stats` isn't world-readable.
+
+---
+
 ## Admin Dashboard
 
 A live stats page is available at:
 
 ```
-http://your-server:port/admin-stats
+http://your-server:port/admin-stats?token=<ADMIN_TOKEN>
 ```
 
 It shows active connections, stream counts, protocol breakdown (TCP/UDP/Mux), total traffic, and connection history. Auto-refreshes every 5 seconds.
 
 > [!WARNING]
-> **Do not expose this endpoint publicly in production. Protect it with your reverse proxy.**
+> **This page prints your `WSPATH` and traffic stats.** With `ADMIN_TOKEN` unset it is hidden behind the decoy page; set `ADMIN_TOKEN` (and, on a VPS, also scope your reverse proxy to `/<WSPATH>`) before relying on it.
 
 ---
 
@@ -302,6 +318,22 @@ The `listen`/`port`/`sockopt.mark` values are specific to your nftables or iptab
 If `workers.dev` resolves to slow edge IPs from your network, you can dial a specific Cloudflare address instead — set `vnext[0].address` to that IP while leaving `serverName` and `wsSettings.host` as your hostname. Cloudflare serves any customer domain from any of its edge IPs, so this stays within the matching rule above and is not fronting.
 
 Do not carry a `pinnedPeerCertSha256` over from a self-hosted setup. It pins one specific certificate, and Cloudflare presents its own and rotates it, so the handshake fails within weeks at best.
+
+### Importing on Android (QR)
+
+`tools/qr.mjs` turns `local/conf-android.json` into a phone-scannable QR so you don't retype the config after a host change. Run `npm install` once, then:
+
+```bash
+npm run qr          # or: node tools/qr.mjs link
+```
+
+builds a `vless://` share link, prints it, renders a QR in the terminal, and writes `local/qr-link.png`. Scan it in any Xray client (v2rayNG, NekoBox, sing-box). This is the easy path **on ordinary networks** — a share link cannot carry a pinned CA, so it omits the `certificates` block (and mux).
+
+```bash
+npm run qr:serve    # or: node tools/qr.mjs serve
+```
+
+is for a [TLS-intercepting network](#networks-that-intercept-tls), where the profile must embed the CA. It serves the whole `conf-android.json` over your LAN at a random one-off path and QRs the URL; scan it from the phone on the same Wi-Fi, download, and import as a **Custom config**. The credentials never leave the LAN — Ctrl-C stops the server when you're done. Both accept an alternate config path as an argument (default `local/conf-android.json`); `qr-link.png` encodes your UUID, so it stays in gitignored `local/`.
 
 ### Networks that intercept TLS
 

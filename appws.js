@@ -18,6 +18,11 @@ const UUID = process.env.UUID || '7bd180e8-1142-4387-93f5-03e8d750a896';
 const TARGET_UUID_BYTES = uuidToBytes(UUID);
 
 const WSPATH = process.env.WSPATH || '/';
+// The /admin-stats dashboard exposes WSPATH and traffic stats. Behind a
+// path-scoped reverse proxy it was unreachable, but a platform that forwards
+// every path (e.g. Fly) makes it world-readable. Gate it: unset => hidden
+// (served the decoy page); set => requires ?token=<ADMIN_TOKEN>.
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const PORT = parseInt(process.env.SERVER_PORT || process.env.PORT || '3000', 10);
 const HOST = process.env.SERVER_HOST || process.env.HOST || '0.0.0.0';
 
@@ -1395,10 +1400,19 @@ function handleConnection(client) {
         }
       }
 
-      if (method === 'GET' && path === '/admin-stats') {
-        const html = generateStatsHtml();
-        sendHttpResponse(client, 200, 'text/html; charset=utf-8', html);
-        return destroy('Admin stats served');
+      const q = path.indexOf('?');
+      const basePath = q === -1 ? path : path.slice(0, q);
+      if (method === 'GET' && basePath === '/admin-stats') {
+        const token = q === -1 ? null : new URLSearchParams(path.slice(q + 1)).get('token');
+        if (ADMIN_TOKEN && token === ADMIN_TOKEN) {
+          const html = generateStatsHtml();
+          sendHttpResponse(client, 200, 'text/html; charset=utf-8', html);
+          return destroy('Admin stats served');
+        }
+        // Unset token or mismatch: hide the endpoint behind the decoy page so
+        // its existence (and the WSPATH it prints) is not disclosed.
+        sendHttpResponse(client, 200, 'text/html; charset=utf-8', FAKE_INDEX_HTML);
+        return destroy('Admin stats gated - served fake page');
       }
 
       if (method === 'GET' && headers['upgrade'] && headers['upgrade'].toLowerCase() === 'websocket') {
