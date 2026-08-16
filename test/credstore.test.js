@@ -65,6 +65,25 @@ test('generated values pass their own validation', () => {
   }
 });
 
+test('every generated value survives a URL unchanged', () => {
+  // ADMIN_TOKEN goes into /admin-stats?token=, where base64's "+" decodes to a
+  // space; the token then fails to match and the request is served the decoy —
+  // a 200 identical to GET /, which reads as an outage rather than a bad token.
+  // Table-driven so a new generator cannot quietly reintroduce that.
+  for (const f of cs.FIELDS) {
+    if (!f.generate) continue;
+    const value = cs.generate(f.key);
+    // WSPATH is a path, so its leading slash is legitimate; nothing else is.
+    const encoded = encodeURIComponent(value).replace(/%2F/g, '/');
+    assert.equal(encoded, value, `${f.key} generates a value that a URL would mangle`);
+  }
+});
+
+test('a generated ADMIN_TOKEN is 32 bytes of lowercase hex', () => {
+  const token = cs.generate('ADMIN_TOKEN');
+  assert.match(token, /^[0-9a-f]{64}$/, 'same 256 bits as before, URL-safe alphabet');
+});
+
 test('PROVISION_SECRET_PREVIOUS is never generatable', () => {
   // It only ever holds a value that was previously current; generating one
   // would authenticate a credential nobody was ever issued.
@@ -93,6 +112,16 @@ test('validateField catches the failures that would otherwise be silent', () => 
 
   assert.equal(cs.validateField('USERS', 'alice,bob'), null);
   assert.match(cs.validateField('USERS', 'alice,<script>'), /invalid labels/);
+
+  // ADMIN_TOKEN rejects only what a URL mangles, not "must be hex" — a token
+  // set by hand from a password manager stays legal.
+  assert.equal(cs.validateField('ADMIN_TOKEN', 'a'.repeat(64)), null);
+  assert.equal(cs.validateField('ADMIN_TOKEN', 'Sane-Token_1.2~3'), null);
+  for (const bad of ['tok+en', 'tok/en', 'token=', 'tok&en', 'tok?en', 'tok#en']) {
+    assert.match(cs.validateField('ADMIN_TOKEN', bad), /URL-safe/, `${bad} must be rejected`);
+  }
+  assert.match(cs.validateField('ADMIN_TOKEN', 'tok en'), /whitespace/, 'whitespace keeps its own reason');
+  assert.match(cs.validateField('ADMIN_TOKEN', ''), /is empty/);
 
   assert.equal(cs.validateField('NOT_A_FIELD', 'anything'), null, 'unmanaged keys are carried, not judged');
 });

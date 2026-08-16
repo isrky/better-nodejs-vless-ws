@@ -21,11 +21,19 @@ For reference, `g` is equivalent to:
 |---|---|
 | `UUID` | `uuidgen \| tr 'A-Z' 'a-z'` |
 | `WSPATH` | `printf '/%s\n' "$(openssl rand -hex 16)"` |
-| `ADMIN_TOKEN` | `openssl rand -base64 32` |
-| `PROVISION_SECRET` | `openssl rand -base64 32` |
+| `ADMIN_TOKEN` | `openssl rand -hex 32` |
+| `PROVISION_SECRET` | `openssl rand -hex 32` |
 
 `PROVISION_SECRET_PREVIOUS` is the one secret `g` will not generate — it may
 only ever hold a value that was previously current.
+
+Every generated secret is hex, so every one of them is URL-safe. That matters
+for `ADMIN_TOKEN` specifically: it is consumed as `/admin-stats?token=…`, and a
+base64 token's `+` decodes to a **space** in a query string, so the comparison
+fails and the request is served the decoy — a 200 identical to `GET /`, which
+reads as an outage rather than a bad token. The tool now rejects an
+`ADMIN_TOKEN` containing anything a URL would mangle, so you cannot set one by
+hand either.
 
 `UUID` must be lowercase 8-4-4-4-12 — the renderer rejects anything else, and
 rejects the default published in this repo. `WSPATH` keeps its leading slash;
@@ -72,6 +80,18 @@ pushed.
 To roll back: `u` in the menu (or restore `credentials.json.bak`), then
 `npm run configs` and re-push. The configs are derived, so there is nothing
 else to restore.
+
+> [!NOTE]
+> **Rotating `ADMIN_TOKEN` does not log out live admin sessions** whenever
+> `PROVISION_SECRET` is set, because the session cookie is signed with a key
+> derived from `PROVISION_SECRET`, not from the token (`src/node/config.js`).
+> An existing `__Host-adm` cookie stays valid for the rest of its TTL — 12 hours
+> by default. The comment in that file about rotation invalidating every session
+> is true only in the fallback case where `PROVISION_SECRET` is unset.
+>
+> Rotating the token still closes off anyone who only has the *token*. To end
+> existing browser sessions as well, rotate `PROVISION_SECRET` — which also
+> invalidates every provisioned user, so read the section below first.
 
 ## `PROVISION_SECRET` is different
 
@@ -146,6 +166,10 @@ Once every key is covered, rename the old file rather than deleting it —
 prints every pushable value grouped by where it is pasted — with the Fly app and
 Worker project names read out of `fly.toml` and `wrangler.toml`, and a link
 straight to the Fly secrets page.
+
+When `ADMIN_TOKEN` and `FLY_HOST` are both set it also prints the dashboard URL
+with the token already encoded, so opening the admin panel is one click rather
+than an assembly step.
 
 Two things it tells you that are easy to get wrong by hand:
 

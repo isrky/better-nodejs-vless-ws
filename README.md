@@ -176,6 +176,9 @@ It shows active connections, stream counts, protocol breakdown (TCP/UDP/Mux), to
 
 The token is needed only once: it is exchanged for an `HttpOnly; Secure; SameSite=Strict` session cookie and the browser is redirected to a clean URL, so the credential stops appearing in history, bookmarks and `Referer`. `?logout=1` clears the session.
 
+> [!TIP]
+> **The token must be URL-encoded.** A token containing `+`, `/` or `=` — anything base64 — will not match if pasted raw, because `+` decodes to a space in a query string. A wrong token is served the decoy page rather than an error, so this looks like the server being down. `npm run creds` generates hex tokens and rejects unsafe ones; `npm run creds:push` prints the finished URL.
+
 > [!WARNING]
 > **This page prints your `WSPATH` and traffic stats.** With `ADMIN_TOKEN` unset it is hidden behind the decoy page; set `ADMIN_TOKEN` (and, on a VPS, also scope your reverse proxy to `/<WSPATH>`) before relying on it.
 

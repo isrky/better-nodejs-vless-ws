@@ -125,6 +125,22 @@ export function formatRevealPrompt(plan, names) {
 }
 
 /**
+ * The admin dashboard URL, ready to open, or null when there is nothing to link.
+ *
+ * With ADMIN_TOKEN unset the route is hidden behind the decoy, so a URL would be
+ * a lie; without FLY_HOST there is no host to build one from. https because
+ * fly.toml sets force_https.
+ *
+ * The token is percent-encoded even though a generated one is hex and needs
+ * none: it costs nothing and keeps this correct for a hand-entered token.
+ */
+export function adminUrl(store) {
+  const { ADMIN_TOKEN, FLY_HOST } = store.credentials;
+  if (!ADMIN_TOKEN || !FLY_HOST) return null;
+  return `https://${FLY_HOST}/admin-stats?token=${encodeURIComponent(ADMIN_TOKEN)}`;
+}
+
+/**
  * The secrets themselves, grouped by where they are pasted.
  *
  * This is the ONLY function in the tool that prints a credential — keeping that
@@ -146,6 +162,15 @@ export function formatReveal(plan, store, names) {
     out.push(dim('  briefly drops every tunnel and resets the stats counters — do them together.'));
     out.push('');
     section(plan.fly);
+
+    const url = adminUrl(store);
+    if (url) {
+      // Handed over ready to open. A wrong token is not an error page but the
+      // decoy, so an encoding slip here looks like an outage rather than a
+      // typo — worth removing the step entirely.
+      out.push(`  ${bold('Admin dashboard')} ${dim('(token already encoded)')}`);
+      out.push(`    ${url}`);
+    }
     out.push('');
   }
 

@@ -211,15 +211,53 @@ test('the reveal prints each secret under the right platform', () => {
   assert.ok(flyPart.includes('SENTINEL-UUID-VALUE') && cfPart.includes('SENTINEL-UUID-VALUE'));
 
   // Render inputs are listed by name under "not pushed", and their values never
-  // appear in either dashboard section. (FLY_HOST may still be quoted in a
-  // PUBLIC_HOST drift warning below — that is the warning naming the value it is
-  // complaining about, and it is a hostname, not a secret.)
+  // appear in either dashboard section as something to paste. Two legitimate
+  // exceptions are stripped first: the admin URL is built from FLY_HOST, and a
+  // PUBLIC_HOST drift warning quotes the value it is complaining about. Both
+  // are hostnames, not secrets.
   assert.match(text, /Not pushed anywhere: .*FLY_HOST/);
-  for (const part of [flyPart, cfPart.slice(0, cfPart.indexOf('Not pushed anywhere'))]) {
+  const pasteable = (s) => s.split('\n').filter((l) => !l.includes('://')).join('\n');
+  for (const part of [pasteable(flyPart),
+                      pasteable(cfPart.slice(0, cfPart.indexOf('Not pushed anywhere')))]) {
     assert.ok(!part.includes('SENTINEL-FLY_HOST-VALUE'), 'render inputs are not pushed');
     assert.ok(!part.includes('SENTINEL-WORKER_HOST-VALUE'));
     assert.ok(!part.includes('SENTINEL-INTERCEPT_CA_FILE-VALUE'));
   }
+});
+
+test('the reveal hands over an admin URL with the token encoded', () => {
+  // The step this removes: a token pasted raw into ?token= whose "+" decodes to
+  // a space, failing to match and serving the decoy — which looks like an
+  // outage. Encoding here is belt-and-braces now that generation is hex, but it
+  // still covers a token someone set by hand.
+  const store = cs.emptyStore();
+  store.credentials.FLY_HOST = 'edge.example.dev';
+  store.credentials.ADMIN_TOKEN = 'needs+encoding/here=';
+
+  assert.equal(
+    cm.adminUrl(store),
+    'https://edge.example.dev/admin-stats?token=needs%2Bencoding%2Fhere%3D'
+  );
+
+  const text = cm.formatReveal(cs.pushPlan(store), store, { fly: 'a', worker: 'b' });
+  const flyPart = text.slice(text.indexOf('Fly —'), text.indexOf('Not pushed anywhere'));
+  assert.ok(flyPart.includes(cm.adminUrl(store)), 'the URL belongs with the Fly secrets');
+  assert.ok(!text.includes('?token=needs+encoding'), 'the raw token must not be linked');
+});
+
+test('there is no admin URL to hand over when it would be a lie', () => {
+  const noHost = cs.emptyStore();
+  noHost.credentials.ADMIN_TOKEN = 'a'.repeat(64);
+  assert.equal(cm.adminUrl(noHost), null, 'no host to build one from');
+
+  // With ADMIN_TOKEN unset the route is hidden behind the decoy, so linking it
+  // would send you to a page that cannot exist.
+  const noToken = cs.emptyStore();
+  noToken.credentials.FLY_HOST = 'edge.example.dev';
+  assert.equal(cm.adminUrl(noToken), null);
+
+  const text = cm.formatReveal(cs.pushPlan(noToken), noToken, { fly: 'a', worker: 'b' });
+  assert.ok(!text.includes('/admin-stats'), 'and it is not mentioned');
 });
 
 test('the reveal warns about the Cloudflare secret-vs-variable trap', () => {

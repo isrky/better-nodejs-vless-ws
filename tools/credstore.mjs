@@ -125,8 +125,23 @@ export const FIELDS = [
     required: false,
     pushTo: ['fly'],
     help: 'gates /admin-stats',
-    generate: () => randomBytes(32).toString('base64'),
-    validate: (v) => (/\s/.test(v) ? 'must not contain whitespace' : v === '' ? 'is empty' : null)
+    // Hex rather than base64: this token is only ever consumed as ?token= in a
+    // URL, and base64's "+" decodes to a space there. A pasted base64 token
+    // therefore fails to match and the request is served the decoy — a 200 that
+    // is byte-identical to GET /, so it reads as "the server is down" rather
+    // than "wrong token". 32 bytes either way; only the alphabet changes.
+    generate: () => randomBytes(32).toString('hex'),
+    validate: (v) => {
+      if (v === '') return 'is empty';
+      if (/\s/.test(v)) return 'must not contain whitespace';
+      // Reject only what a URL actually mangles, the way WSPATH does — a
+      // hand-chosen token of letters, digits, - _ . ~ stays legal.
+      if (encodeURIComponent(v) !== v) {
+        const bad = [...new Set([...v].filter((ch) => encodeURIComponent(ch) !== ch))].join(' ');
+        return `contains ${bad} — must be URL-safe, it is pasted into /admin-stats?token=`;
+      }
+      return null;
+    }
   },
   {
     key: 'PROVISION_SECRET',
@@ -135,7 +150,11 @@ export const FIELDS = [
     required: false,
     pushTo: ['fly'],
     help: 'every provisioned user UUID is derived from this',
-    generate: () => randomBytes(32).toString('base64'),
+    // Hex for the same reason as ADMIN_TOKEN, though this one never reaches a
+    // URL. Keeping one alphabet for every generated secret makes "a generated
+    // value is always URL-safe" a property the whole table can be tested
+    // against, rather than a rule with an exception waiting to be forgotten.
+    generate: () => randomBytes(32).toString('hex'),
     validate: (v) => (/\s/.test(v) ? 'must not contain whitespace' : v === '' ? 'is empty' : null)
   },
   {
