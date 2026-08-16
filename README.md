@@ -78,16 +78,36 @@ The configuration is done through environment variables.
 
 | Variable | Default | Description |
 |---|---|---|
-| `UUID` | `7bd180e8-...` | VLESS authentication UUID |
-| `WSPATH` | First 8 chars of UUID (can be changed through variables) | WebSocket path prefix |
+| `UUID` | `7bd180e8-...` | Your own VLESS UUID. Authenticates as the reserved user `owner`. |
+| `WSPATH` | `/` | WebSocket path prefix |
 | `PORT` / `SERVER_PORT` | `3000` | Listening port |
-| `ADMIN_TOKEN` | *(unset)* | Gate for `/admin-stats`. Unset → the page is hidden (serves the decoy). Set → requires `?token=<ADMIN_TOKEN>`. |
+| `ADMIN_TOKEN` | *(unset)* | Gate for `/admin-stats`. Unset → the page is hidden (serves the decoy). Set → `?token=<ADMIN_TOKEN>` once, then a session cookie. |
+
+Provisioning (see [Provisioning other people's devices](#provisioning-other-peoples-devices)) adds:
+
+| Variable | Default | Description |
+|---|---|---|
+| `PROVISION_SECRET` | *(unset)* | Master secret each user's UUID is derived from. Unset → provisioning is off entirely and every provisioning route serves the decoy. |
+| `PROVISION_SECRET_PREVIOUS` | *(unset)* | Also accepted during a secret rotation, so existing devices keep working. |
+| `USERS` | *(empty)* | Comma/space separated labels, e.g. `alice,bob`. `[a-z0-9_-]`, max 32 chars, max 64 users. `owner` is reserved. |
+| `PUBLIC_HOST` | *(Host header)* | Hostname written into generated configs. Effectively mandatory — see the warning on the provisioning page. |
+| `PUBLIC_PORT` | `443` | Port written into generated configs. |
+| `INVITE_TTL_SECONDS` | `900` | How long a minted invite stays valid. |
+| `INVITE_PATH` | `/i/` | Prefix for invite links. Change it if it would collide with `WSPATH`. |
+| `SESSION_TTL_SECONDS` | `43200` | Admin cookie lifetime. |
+| `INTERCEPT_CA` | *(built-in)* | Override the CA embedded in generated configs. Empty string omits it. |
+| `TRUST_PROXY` | auto | `1`/`0`. Auto-detected from `FLY_APP_NAME`; controls whether `X-Forwarded-Proto` and `Fly-Client-IP` are believed. |
 
 **Example:**
 
 ```bash
 UUID=your-uuid-here WSPATH=mypath PORT=8080 node appws.js
 ```
+
+The table above is **server** environment. The *client* side keeps its values in
+`local/credentials.json`, managed with `npm run creds` and rendered into the
+configs under `local/` by `npm run configs`. See [CREDENTIALS.md](CREDENTIALS.md)
+for generating each value and for the rotation order.
 
 ---
 
@@ -152,10 +172,45 @@ A live stats page is available at:
 http://your-server:port/admin-stats?token=<ADMIN_TOKEN>
 ```
 
-It shows active connections, stream counts, protocol breakdown (TCP/UDP/Mux), total traffic, and connection history. Auto-refreshes every 5 seconds.
+It shows active connections, stream counts, protocol breakdown (TCP/UDP/Mux), total traffic, per-user totals, and connection history. It updates live over Server-Sent Events, about once a second — no page reload, so scroll position survives.
+
+The token is needed only once: it is exchanged for an `HttpOnly; Secure; SameSite=Strict` session cookie and the browser is redirected to a clean URL, so the credential stops appearing in history, bookmarks and `Referer`. `?logout=1` clears the session.
 
 > [!WARNING]
 > **This page prints your `WSPATH` and traffic stats.** With `ADMIN_TOKEN` unset it is hidden behind the decoy page; set `ADMIN_TOKEN` (and, on a VPS, also scope your reverse proxy to `/<WSPATH>`) before relying on it.
+
+---
+
+## Provisioning other people's devices
+
+`/admin-stats/provision` mints a short-lived invite link for one configured user. They open it on their phone, scan or tap, and connect. **Fly/VPS only** — the Workers build has no admin page and stays single-user.
+
+Each person gets their **own UUID**, derived rather than stored:
+
+```
+uuid(label) = HMAC-SHA256(PROVISION_SECRET, "vless-uuid-v1\n" + label)[0..16]
+```
+
+Nothing is written to disk, which matters because Fly machines have no volume — a users file would work in testing and vanish on the next deploy. The whole registry is reproducible from two secrets.
+
+```bash
+fly secrets set PROVISION_SECRET="$(openssl rand -base64 32)" USERS=alice,bob
+fly secrets set PUBLIC_HOST=edge.example.com
+```
+
+Then open `/admin-stats/provision`, pick a user, and send them the link. It expires in 15 minutes.
+
+**What the invitee gets.** The landing page carries no credential — chat apps fetch pasted URLs to build previews, and burning the invite there would kill it before the human taps. Tapping through reveals a `vless://` link (one tap into v2rayNG, Streisand, Hiddify or NekoBox), a QR of it, and a **full JSON config download**. The download exists because a share link structurally cannot carry a certificate: on a [TLS-intercepting network](#networks-that-intercept-tls) only the JSON works.
+
+**Revoking.** Drop the label from `USERS` and redeploy. Their credential stops authenticating immediately, including any live tunnel, and nobody else is affected.
+
+> [!IMPORTANT]
+> **Rotating `PROVISION_SECRET` invalidates every derived UUID at once**, and the failure looks like the server being down rather than a stale credential — a mismatched UUID gets the decoy page and a hangup. Rotate in two deploys: first set `PROVISION_SECRET_PREVIOUS` to the old value alongside the new `PROVISION_SECRET`, reissue everyone, then remove it.
+
+> [!WARNING]
+> **Provisioning happens over the network you are trying to circumvent.** The invitee downloads their credential through the same middlebox the config exists to work around, so an intercepting network sees it in plaintext at that moment. This inverts the usual intuition that the pinned CA is protective — it makes the tunnel work, it does not hide the handover. Provision over mobile data where it matters.
+
+Two more things worth knowing. `fly secrets set` restarts the machine, so adding or removing a user briefly drops every tunnel and resets the stats counters — batch your changes. And invites are **not** reliably single-use: redemption is remembered in memory only, so a restart makes an unexpired link usable again. The 15-minute expiry is the real boundary.
 
 ---
 
@@ -202,6 +257,7 @@ Secrets survive redeployment, whereas plain-text vars are overwritten from `wran
 | DNS over UDP (port 53) | ✅ native | ✅ via DNS-over-HTTPS |
 | UDP to any other port | ✅ | ❌ no UDP on Workers |
 | Mux.Cool (TCP substreams) | ✅ | ✅ |
+| Multi-user / device provisioning | ✅ | ❌ single-user only |
 | xUDP / Mux UDP substreams | ✅ | ⚠️ port 53 only |
 | TLS | self-signed or reverse proxy | ✅ terminated at the edge |
 | Admin dashboard | ✅ `/admin-stats` | ❌ use the Cloudflare dashboard |
@@ -271,17 +327,29 @@ Same as above, with these differences:
 
 ### Linux Transparent Proxy (TPROXY)
 
-[`conf.json`](conf.json) is a complete Xray-core client config for a system-wide transparent proxy, and [`conf-android.json`](conf-android.json) is its counterpart for a phone — a local SOCKS inbound instead of TPROXY, plus the extras a filtered mobile network needs.
+[`templates/linux-tproxy.json`](templates/linux-tproxy.json) is a complete Xray-core client config for a system-wide transparent proxy, and [`templates/android-socks.json`](templates/android-socks.json) is its counterpart for a phone — a local SOCKS inbound instead of TPROXY, plus the extras a filtered mobile network needs.
 
-Both are templates. Every secret in them is a `<...>` placeholder, and the three host fields deliberately share one token, because `serverName`, `wsSettings.host` and the outbound address must all be identical. Copy the one you need into `local/`, which is gitignored, and fill in your own values there:
+Both are templates: every secret in them is a `${...}` placeholder, and the three host fields deliberately share one token, because `serverName`, `wsSettings.host` and the outbound address must all be identical. You do not copy or edit them. Set your values once, then render:
 
 ```bash
-cp conf-android.json local/
-$EDITOR local/conf-android.json
+npm run creds               # UUID, WSPATH, FLY_HOST, WORKER_HOST — press g to generate
+npm run configs             # writes the four local/*.json
 xray run -c local/conf-android.json
 ```
 
-Keeping the working copy in `local/` rather than editing the template in place is what stops a real UUID and WSPATH reaching a commit.
+Two templates produce **four** configs, because the outputs vary along two independent axes — platform (TPROXY vs SOCKS) and UDP policy:
+
+| | UDP blackholed | UDP tunnelled |
+|---|---|---|
+| **Linux TPROXY** | `local/conf.json` | `local/conf-udp.json` |
+| **Android SOCKS** | `local/conf-android.json` | `local/conf-android-udp.json` |
+
+The UDP variants target the Fly build, which carries UDP; the others target the Worker, which does not. See [CREDENTIALS.md](CREDENTIALS.md) for generating and rotating the values.
+
+> [!IMPORTANT]
+> `local/*.json` are **generated**. Editing one works until the next `npm run configs` silently discards it — put durable changes in `templates/` instead, and run `npm run configs:check` (exit 2 on drift) if you are unsure whether a file is still in sync.
+
+Credentials never reach a commit because they never leave `local/credentials.json` (mode 0600, gitignored). The renderer refuses to write a config with an unreplaced placeholder, and `npm test` greps every committable file for a value from the store, so the old hand-editing failure mode is gone twice over.
 
 Two details in it are deliberate and worth understanding before changing them.
 
@@ -289,11 +357,11 @@ Two details in it are deliberate and worth understanding before changing them.
 
 **UDP other than DNS is blackholed locally.** Workers has no UDP, so a `network: udp` routing rule sends the rest to a `blackhole` outbound and applications fail immediately instead of waiting on the Worker to refuse. For the same reason `mux.xudpProxyUDP443` is `reject` rather than `allow`, which makes browsers fall back to TCP for HTTP/3 straight away.
 
-**`mux.concurrency` is `-1` in the templates**, which disables TCP multiplexing while leaving XUDP intact. That is the conservative default, chosen because it is the correct one on the Free plan — not because it is the faster one.
+**`mux.concurrency` is `8` in the templates.** That is correct for the Fly build and for Workers **Paid**. On the Workers **Free** plan set it to `-1` in `templates/*.json` and re-render — `-1` disables TCP multiplexing while leaving XUDP intact, and it is the only safe setting against a 10 ms CPU budget.
 
 Multiplexing is a real latency win but it is not free. Measured over the same workload, mux used roughly **twice the total CPU** of the plain relay (767 ms and 791 ms across two runs, against 399 ms) and — worse for the Free plan — concentrated all of it into **one** invocation rather than spreading it over 54, since a single WebSocket carries every connection. Against a 10 ms per-invocation budget that is fatal. Against 30 s on Paid it is irrelevant, and mux also *reduces* request count, because one upgrade serves up to eight connections.
 
-So: set it to `8` on Workers Paid, leave it at `-1` on Free.
+So: `8` on Fly or Workers Paid, `-1` on Workers Free.
 
 > [!NOTE]
 > Until recently `-1` was the only setting that worked correctly, because the mux path had no `PROXYIP` retry: multiplexed substreams could not reach Cloudflare-hosted origins at all, so enabling mux silently broke a large share of the web while direct-dial destinations kept working. `src/worker/mux.mjs` now performs the same per-substream retry that `src/worker/relay.mjs` does. The retry is per substream rather than per connection, since one mux session carries many destinations at once.
@@ -342,20 +410,22 @@ Some networks — corporate, school, and national filters — terminate every TL
 - **HTTP/2 stops working**, because interception forces traffic back to HTTP/1.1. WebSocket is what survives, which is why this transport is the right choice here even though Xray now prints `WebSocket transport … is deprecated, migrate to XHTTP H2 & H3` on startup. **Ignore that warning on such a network.** H2 is precisely what the middlebox breaks, and H3 is QUIC over UDP, which these networks generally block outside ports 53 and 123. Do not "migrate" and expect it to keep working.
 - **The certificate your client sees is not Cloudflare's.** You have to trust the interception CA, or the handshake fails.
 
-Add the CA to `tlsSettings.certificates` rather than installing it system-wide. [`conf-android.json`](conf-android.json) is set up this way already, with the certificate itself left as a placeholder for you to paste over:
+Add the CA to `tlsSettings.certificates` rather than installing it system-wide. Both templates carry a `${CA_PEM_LINES}` marker, and `npm run configs` splices the PEM in from `src/node/interceptca.js`, so there is nothing to paste:
 
 ```json
 "tlsSettings": {
-  "serverName": "<your-host>",
+  "serverName": "${HOST}",
   "certificates": [
-    { "usage": "verify", "certificate": ["-----BEGIN CERTIFICATE-----", "…", "-----END CERTIFICATE-----"] }
+    { "usage": "verify", "certificate": ["${CA_PEM_LINES}"] }
   ]
 }
 ```
 
+Choose the CA in `npm run creds` → `INTERCEPT_CA_FILE`, which offers three named states: **bundled** (the root from `src/node/interceptca.js`), **none** (omit the `certificates` block entirely), or **file** (your own **PEM**, not DER — convert a `.cer` with `openssl x509 -inform der -in x.cer -out ca.pem`). `npm run configs` prints which one is in effect.
+
 This **adds** to the system trust store rather than replacing it — `disableSystemRoot` defaults to `false` — so ordinary public certificates still validate. On Android this is not merely tidier but required: Go reads only `/system/etc/security/cacerts`, so a CA you install through Settings is invisible to Xray.
 
-Note that forgetting to replace the placeholder is not caught by `xray run -test`. Xray ignores PEM it cannot parse rather than rejecting the config, so the certificate is simply never added to the pool. That fails closed rather than open — verification still runs against the public roots — but it surfaces as an `x509` error when you connect, not when you validate. If a config that tests clean fails to handshake on an intercepting network, check the certificate block first.
+Note that forgetting to replace the placeholder is not caught by `xray run -test`. Xray ignores PEM it cannot parse rather than rejecting the config — which is why `npm run configs` parses it with `node:crypto`'s `X509Certificate` and refuses to write anything if it fails, so the certificate is simply never added to the pool. That fails closed rather than open — verification still runs against the public roots — but it surfaces as an `x509` error when you connect, not when you validate. If a config that tests clean fails to handshake on an intercepting network, check the certificate block first.
 
 Two caveats. On **Windows** a CA supplied this way is silently ignored unless you also set `disableSystemRoot: true`, which then drops the public roots; import it into the Windows certificate store instead. And `alpn` should be **left unset** — Xray's WebSocket dialer already pins `http/1.1`, so setting it explicitly does nothing and setting `["h2","http/1.1"]` will break the upgrade.
 
@@ -402,12 +472,45 @@ There is no way to code around a 12–40× shortfall. **Workers Paid is the fix*
 
 ## Project Structure
 
+Both builds share the protocol code in `src/` and split the rest into small,
+single-purpose modules. The Node build is `src/node/` (CommonJS); the Workers
+build is `src/worker/` (ESM); `src/vless.js` and `src/decoy.js` are shared by
+both.
+
 ```
-appws.js              # Node.js server (single file)
-conf.json             # client template: Linux system-wide TPROXY
-conf-android.json     # client template: Android / local SOCKS
-local/                # your filled-in copies (gitignored)
+appws.js              # Node entry point — requires src/node/server.js and listens
+CREDENTIALS.md        # generating and rotating credential values
+templates/            # client config templates — placeholders only
+  linux-tproxy.json   #   Linux system-wide TPROXY
+  android-socks.json  #   Android / local SOCKS
+local/                # credentials.json plus the configs rendered from it (gitignored)
+tools/
+  credentials.mjs     #   interactive credential manager (npm run creds)
+  credstore.mjs       #   the store: schema, validation, atomic read/write
+  render-configs.mjs  #   renders local/*.json from templates/ + the store
+  qr.mjs              #   share link / QR pipeline
 src/vless.js          # VLESS parser + byte queue, shared by both builds
+src/decoy.js          # decoy cover page, shared by both builds
+src/node/             # Node.js server build
+  server.js           #   createServer/startServer, TLS-vs-plaintext dispatch
+  session.js          #   per-connection state machine, backpressure contract
+  http.js             #   HTTP/1.1 head parsing, response writers, accept key
+  wsframe.js          #   WebSocket frame encode/decode
+  relay.js            #   VLESS CMD 1: TCP tunnel
+  udp.js              #   VLESS CMD 2: length-prefixed UDP
+  mux.js              #   VLESS CMD 3: Mux.Cool / xUDP substreams
+  dnscache.js         #   DNS cache + in-flight request coalescing
+  stats.js            #   connection and traffic counters
+  pages.js            #   admin dashboard rendering
+  users.js            #   HMAC-derived per-user credentials, registry lookup
+  tokens.js           #   signed invites and admin sessions, burn store
+  clientconf.js       #   vless:// links and Xray config generation
+  interceptca.js      #   baked interception CA for generated configs
+  provision-pages.js  #   invite minting and redemption pages
+  ratelimit.js        #   token-bucket limiter for admin/invite routes
+  config.js           #   env reading (the only module that touches process.env)
+  tlscert.js          #   bundled self-signed keypair, TLS detection
+  log.js              #   timestamped logger
 src/worker/           # Cloudflare Workers build
   index.mjs           #   fetch entry: routing, handshake, header parse
   relay.mjs           #   TCP relay over cloudflare:sockets, PROXYIP retry
@@ -416,10 +519,32 @@ src/worker/           # Cloudflare Workers build
   wsstream.mjs        #   WebSocket to ReadableStream adapter
   config.mjs          #   env reading, cached UUID bytes
   bytes.mjs           #   base64url and length-prefix helpers
-  pages.mjs           #   decoy page
+  pages.mjs           #   decoy page (re-exports src/decoy.js)
+test/                 # node:test suite — `npm test`, zero dependencies
 wrangler.toml
 README.md
 ```
+
+### Tests
+
+```bash
+npm test
+```
+
+Uses Node's built-in test runner, so there is nothing to install. The suite
+covers the WebSocket codec, HTTP head parsing, config, stats, the DNS cache,
+the admin-token gate, credential derivation, invite signing, the provisioning
+gate truth table, and end-to-end tunnels over all three VLESS commands (TCP,
+legacy UDP, and Mux.Cool) against real echo servers.
+
+`test/image.test.js` walks the require graph from `appws.js` and fails if
+anything the server loads falls outside the Dockerfile's COPY list or pulls in
+an npm dependency — the class of mistake that works locally and crashes the
+container on boot.
+
+`src/node/server.js` is importable without side effects — `createServer()`
+builds a server without binding a port, printing a banner, or starting a timer
+that would hold the event loop open. `appws.js` is the only thing that listens.
 
 ---
 

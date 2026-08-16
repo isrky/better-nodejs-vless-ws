@@ -6,6 +6,13 @@
   "type": "commonjs",
   "scripts": {
     "start": "node appws.js",
+    "configs": "node tools/render-configs.mjs",
+    "configs:check": "node tools/render-configs.mjs --check",
+    "creds": "node tools/credentials.mjs",
+    "creds:status": "node tools/credentials.mjs --status",
+    "creds:push": "node tools/credentials.mjs --push",
+    "test": "node --test",
+    "test:watch": "node --test --watch",
     "dev": "wrangler dev --remote",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
@@ -15,7 +22,7 @@
   "author": "cocaococao",
   "license": "GPL-3.0-or-later",
   "engines": {
-    "node": ">16.0.0"
+    "node": ">=18.0.0"
   },
   "devDependencies": {
     "qrcode": "^1.5.4",
