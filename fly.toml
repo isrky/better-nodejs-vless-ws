@@ -11,6 +11,12 @@ primary_region = 'ams'
 
 [env]
   SERVER_PORT = '3000'
+  # Hostname written into the client configs handed out by /admin-stats/provision.
+  # Not a secret, so it lives here rather than in `fly secrets` — it is reviewable
+  # in git, and getting it wrong is silent: without it the server falls back to
+  # the Host header of whichever request minted the invite, so opening the panel
+  # via isrky-edge.fly.dev would produce configs pointing at that name instead.
+  PUBLIC_HOST = 'edge.isrky.dev'
 
 [http_service]
   internal_port = 3000
