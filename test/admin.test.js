@@ -388,3 +388,43 @@ test('an unfinished connection is not counted either', async (t) => {
 
   assert.equal(srv.handle.stats.snapshot().totalConnections, 0);
 });
+
+// ---------- the operator nav ----------
+
+/** Unlock a dashboard and return its rendered HTML. */
+async function dashboard(srv) {
+  const { head } = await headOf(srv.port, '/admin-stats?token=s3cret');
+  // bodyOf yields a Buffer; every other caller hashes it, this one reads it.
+  return String(await bodyOf(srv.port, '/admin-stats', 'GET', cookieOf(head)));
+}
+
+test('the dashboard links to provisioning only when provisioning is on', async (t) => {
+  // The integration guard behind renderStatsPage's optional nav argument: a
+  // forgotten call site renders a perfectly valid, nav-less page, which no unit
+  // test on the renderer would catch.
+  const on = await start({ ADMIN_TOKEN: 's3cret', PROVISION_SECRET: 'p', USERS: 'alice' });
+  t.after(() => on.close());
+  const withProvisioning = await dashboard(on);
+  assert.match(withProvisioning, /href="\/admin-stats\/provision"/);
+  assert.match(withProvisioning, /href="\/admin-stats\?logout=1"/, 'sign-out must be reachable');
+
+  // Unset PROVISION_SECRET and that route serves the decoy, so linking it would
+  // look like a broken site rather than a disabled feature.
+  const off = await start({ ADMIN_TOKEN: 's3cret', USERS: 'alice' });
+  t.after(() => off.close());
+  const without = await dashboard(off);
+  assert.ok(!without.includes('/admin-stats/provision'), 'must not link a decoyed route');
+  assert.match(without, /href="\/admin-stats\?logout=1"/);
+});
+
+test('the provisioning page navigates back to the dashboard', async (t) => {
+  const srv = await start({ ADMIN_TOKEN: 's3cret', PROVISION_SECRET: 'p', USERS: 'alice' });
+  t.after(() => srv.close());
+
+  const { head } = await headOf(srv.port, '/admin-stats?token=s3cret');
+  const body = String(await bodyOf(srv.port, '/admin-stats/provision', 'GET', cookieOf(head)));
+
+  assert.match(body, /<nav>/);
+  assert.match(body, /href="\/admin-stats"/);
+  assert.match(body, /href="\/admin-stats\/provision" aria-current="page"/);
+});

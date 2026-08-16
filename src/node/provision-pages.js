@@ -141,7 +141,7 @@ function qrBlock(text) {
 // Operator side
 // ==========================================
 
-function renderProvisionPage({ labels, minted = null, publicHost = '', adminPath }) {
+function renderProvisionPage({ labels, minted = null, publicHost = '', adminPath, nav = '' }) {
   const options = labels.length === 0
     ? '<option value="" disabled selected>No users configured</option>'
     : labels.map((l) => `<option value="${escapeHtml(l)}">${escapeHtml(l)}</option>`).join('\n                ');
@@ -171,7 +171,8 @@ ${qrBlock(minted.url)}
   return page({
     title: 'Provision a device',
     qr: Boolean(minted),
-    body: `        <hgroup>
+    body: `${nav}
+        <hgroup>
             <h1>Provision a device</h1>
             <p>Mint a short-lived invite link for one configured user.</p>
         </hgroup>
@@ -185,7 +186,7 @@ ${hostWarning}
         </form>
 ${emptyNote}
 ${mintedBlock}
-        <p><a href="${escapeHtml(adminPath.replace(/\/provision$/, ''))}">&larr; Back to statistics</a></p>`
+`
   });
 }
 

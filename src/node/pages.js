@@ -275,12 +275,41 @@ const CLIENT_JS = `
 `;
 
 /**
+ * The nav shared by the two operator pages.
+ *
+ * Takes paths rather than reaching for them: ADMIN_PATH and its provision
+ * sibling belong to session.js, which owns the routing, and duplicating them
+ * here is how the link and the route drift apart.
+ *
+ * `provisionPath` is nullable and null omits the entry. The caller passes null
+ * when provisioning is off, because that route answers with the decoy — a link
+ * to it would look like a broken site rather than a disabled feature.
+ *
+ * @param {'stats'|'provision'} current
+ */
+function renderAdminNav({ current, statsPath, provisionPath = null, logoutPath }) {
+  const item = (href, label, key) =>
+    `<li><a href="${escapeHtml(href)}"${current === key ? ' aria-current="page"' : ''}>${label}</a></li>`;
+
+  const links = [item(statsPath, 'Statistics', 'stats')];
+  if (provisionPath) links.push(item(provisionPath, 'Provision a device', 'provision'));
+  links.push(item(logoutPath, 'Sign out', 'logout'));
+
+  return `        <nav>
+            <ul><li><strong>Admin</strong></li></ul>
+            <ul>${links.join('')}</ul>
+        </nav>`;
+}
+
+/**
  * Render the admin dashboard from a stats snapshot.
  *
  * @param {object} snapshot - see createStats().snapshot() in stats.js
  * @param {string} wsPath   - shown so the operator can confirm the live path
+ * @param {string} nav      - pre-rendered nav HTML; '' renders none, which
+ *                            keeps this a pure string builder over its inputs
  */
-function renderStatsPage(snapshot, wsPath) {
+function renderStatsPage(snapshot, wsPath, nav = '') {
   return `<!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
@@ -293,6 +322,7 @@ function renderStatsPage(snapshot, wsPath) {
 </head>
 <body>
     <main class="container">
+${nav}
         <hgroup>
             <h1>Server Statistics Dashboard</h1>
             <p>Live monitoring of all connections and traffic &mdash; <span id="s-link">connecting</span></p>
@@ -341,6 +371,7 @@ ${CLIENT_JS}
 module.exports = {
   FAKE_INDEX_HTML,
   renderStatsPage,
+  renderAdminNav,
   escapeHtml,
   embedJson,
   formatDuration,

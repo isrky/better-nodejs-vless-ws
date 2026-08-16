@@ -174,6 +174,8 @@ http://your-server:port/admin-stats?token=<ADMIN_TOKEN>
 
 It shows active connections, stream counts, protocol breakdown (TCP/UDP/Mux), total traffic, per-user totals, and connection history. It updates live over Server-Sent Events, about once a second — no page reload, so scroll position survives.
 
+A nav at the top links to the provisioning page and to sign-out, so neither is a URL you have to remember. The provisioning entry appears only when `PROVISION_SECRET` is set, because that route otherwise serves the decoy.
+
 The token is needed only once: it is exchanged for an `HttpOnly; Secure; SameSite=Strict` session cookie and the browser is redirected to a clean URL, so the credential stops appearing in history, bookmarks and `Referer`. `?logout=1` clears the session.
 
 > [!TIP]

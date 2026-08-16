@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  FAKE_INDEX_HTML, renderStatsPage, escapeHtml, embedJson, formatDuration, formatMb
+  FAKE_INDEX_HTML, renderStatsPage, renderAdminNav, escapeHtml, embedJson, formatDuration, formatMb
 } = require('../src/node/pages.js');
 const decoy = require('../src/decoy.js');
 
@@ -183,4 +183,48 @@ test('the decoy page stays a plain cover site', () => {
   assert.ok(!/<form/i.test(FAKE_INDEX_HTML));
   const origins = [...FAKE_INDEX_HTML.matchAll(/https?:\/\/([^/"']+)/g)].map((m) => m[1]);
   assert.deepEqual([...new Set(origins)], ['cdn.jsdelivr.net']);
+});
+
+// ---------- the operator nav ----------
+
+const NAV = { current: 'stats', statsPath: '/admin-stats', logoutPath: '/admin-stats?logout=1' };
+
+test('the nav omits provisioning unless it is available', () => {
+  // /admin-stats/provision answers with the decoy when PROVISION_SECRET is
+  // unset, so linking it would look like a broken site rather than a feature
+  // that is switched off.
+  const without = renderAdminNav(NAV);
+  assert.ok(!without.includes('/admin-stats/provision'));
+  assert.match(without, /Statistics/);
+  assert.match(without, /Sign out/);
+
+  const with_ = renderAdminNav({ ...NAV, provisionPath: '/admin-stats/provision' });
+  assert.match(with_, /href="\/admin-stats\/provision"/);
+});
+
+test('the nav marks the current page and only the current page', () => {
+  const onStats = renderAdminNav({ ...NAV, provisionPath: '/admin-stats/provision' });
+  assert.equal((onStats.match(/aria-current/g) || []).length, 1);
+  assert.match(onStats, /href="\/admin-stats" aria-current="page"/);
+
+  const onProvision = renderAdminNav({
+    ...NAV, current: 'provision', provisionPath: '/admin-stats/provision'
+  });
+  assert.equal((onProvision.match(/aria-current/g) || []).length, 1);
+  assert.match(onProvision, /href="\/admin-stats\/provision" aria-current="page"/);
+});
+
+test('the nav escapes the paths it is given', () => {
+  const nav = renderAdminNav({ ...NAV, statsPath: '/x"><script>alert(1)</script>' });
+  assert.ok(!nav.includes('<script>'), 'a path reaches an href attribute');
+});
+
+test('renderStatsPage stays pure and nav-less when given no nav', () => {
+  const html = renderStatsPage(snapshot(), '/tunnel');
+  assert.ok(!html.includes('<nav>'), 'the two-argument form renders no nav');
+  assert.equal(renderStatsPage(snapshot(), '/tunnel'), html);
+
+  const withNav = renderStatsPage(snapshot(), '/tunnel', renderAdminNav(NAV));
+  assert.match(withNav, /<nav>/);
+  assert.ok(withNav.indexOf('<nav>') < withNav.indexOf('<h1>'), 'nav comes first in main');
 });

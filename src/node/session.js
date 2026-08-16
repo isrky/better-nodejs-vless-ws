@@ -42,7 +42,7 @@ const {
 } = require('./tokens.js');
 const { randomBytes } = require('crypto');
 const { clientIp } = require('./ratelimit.js');
-const { FAKE_INDEX_HTML, renderStatsPage } = require('./pages.js');
+const { FAKE_INDEX_HTML, renderStatsPage, renderAdminNav } = require('./pages.js');
 const {
   renderProvisionPage, renderInvitePage, renderRevealPage, renderStalePage
 } = require('./provision-pages.js');
@@ -321,6 +321,22 @@ class Session {
   }
 
   /**
+   * The nav shared by the dashboard and the provisioning page.
+   *
+   * The provision entry is gated on exactly the condition #serveProvision gates
+   * on, so the link can never lead to the decoy — which would read as a broken
+   * site rather than a feature that is switched off.
+   */
+  #adminNav(current) {
+    return renderAdminNav({
+      current,
+      statsPath: ADMIN_PATH,
+      provisionPath: this.config.provisioning ? ADMIN_PROVISION_PATH : null,
+      logoutPath: ADMIN_PATH + '?logout=1'
+    });
+  }
+
+  /**
    * Charge a failed attempt against the caller's budget.
    *
    * Over the limit still serves the decoy rather than a 429: a distinct status
@@ -394,7 +410,7 @@ class Session {
     if (auth === 'query') return this.#exchangeForCookie(req);
 
     sendHttpResponse(this.#client, 200, HTML,
-      renderStatsPage(this.stats.snapshot(), this.config.wsPath));
+      renderStatsPage(this.stats.snapshot(), this.config.wsPath, this.#adminNav('stats')));
     this.destroy('Admin stats served');
   }
 
@@ -449,6 +465,7 @@ class Session {
     }
 
     sendHttpResponse(this.#client, 200, HTML, renderProvisionPage({
+      nav: this.#adminNav('provision'),
       labels: this.config.registry.labels,
       minted,
       publicHost: this.config.publicHost,
