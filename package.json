@@ -6,6 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "start": "node appws.js",
+    "test": "node --test",
+    "test:watch": "node --test --watch",
     "dev": "wrangler dev --remote",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",

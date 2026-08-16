@@ -1,6 +1,6 @@
 # Keep the build context tiny and, above all, keep secrets out of the image.
-# The Dockerfile COPYs only appws.js + src/vless.js, but this is defence in
-# depth in case that is ever broadened to `COPY . .`.
+# The Dockerfile COPYs only appws.js + src/vless.js + src/decoy.js + src/node/,
+# but this is defence in depth in case that is ever broadened to `COPY . .`.
 local/
 node_modules/
 .git/
@@ -8,6 +8,7 @@ node_modules/
 .wrangler/
 restrictions/
 tools/
+test/
 *.md
 *.cer
 package-lock.json
