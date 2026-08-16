@@ -402,12 +402,32 @@ There is no way to code around a 12–40× shortfall. **Workers Paid is the fix*
 
 ## Project Structure
 
+Both builds share the protocol code in `src/` and split the rest into small,
+single-purpose modules. The Node build is `src/node/` (CommonJS); the Workers
+build is `src/worker/` (ESM); `src/vless.js` and `src/decoy.js` are shared by
+both.
+
 ```
-appws.js              # Node.js server (single file)
+appws.js              # Node entry point — requires src/node/server.js and listens
 conf.json             # client template: Linux system-wide TPROXY
 conf-android.json     # client template: Android / local SOCKS
 local/                # your filled-in copies (gitignored)
 src/vless.js          # VLESS parser + byte queue, shared by both builds
+src/decoy.js          # decoy cover page, shared by both builds
+src/node/             # Node.js server build
+  server.js           #   createServer/startServer, TLS-vs-plaintext dispatch
+  session.js          #   per-connection state machine, backpressure contract
+  http.js             #   HTTP/1.1 head parsing, response writers, accept key
+  wsframe.js          #   WebSocket frame encode/decode
+  relay.js            #   VLESS CMD 1: TCP tunnel
+  udp.js              #   VLESS CMD 2: length-prefixed UDP
+  mux.js              #   VLESS CMD 3: Mux.Cool / xUDP substreams
+  dnscache.js         #   DNS cache + in-flight request coalescing
+  stats.js            #   connection and traffic counters
+  pages.js            #   admin dashboard rendering
+  config.js           #   env reading (the only module that touches process.env)
+  tlscert.js          #   bundled self-signed keypair, TLS detection
+  log.js              #   timestamped logger
 src/worker/           # Cloudflare Workers build
   index.mjs           #   fetch entry: routing, handshake, header parse
   relay.mjs           #   TCP relay over cloudflare:sockets, PROXYIP retry
@@ -416,10 +436,26 @@ src/worker/           # Cloudflare Workers build
   wsstream.mjs        #   WebSocket to ReadableStream adapter
   config.mjs          #   env reading, cached UUID bytes
   bytes.mjs           #   base64url and length-prefix helpers
-  pages.mjs           #   decoy page
+  pages.mjs           #   decoy page (re-exports src/decoy.js)
+test/                 # node:test suite — `npm test`, zero dependencies
 wrangler.toml
 README.md
 ```
+
+### Tests
+
+```bash
+npm test
+```
+
+Uses Node's built-in test runner, so there is nothing to install. The suite
+covers the WebSocket codec, HTTP head parsing, config, stats, the DNS cache,
+the admin-token gate, and end-to-end tunnels over all three VLESS commands
+(TCP, legacy UDP, and Mux.Cool) against real echo servers.
+
+`src/node/server.js` is importable without side effects — `createServer()`
+builds a server without binding a port, printing a banner, or starting a timer
+that would hold the event loop open. `appws.js` is the only thing that listens.
 
 ---
 
