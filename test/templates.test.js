@@ -24,7 +24,7 @@ const { INTERCEPT_CA_PEM } = require('../src/node/interceptca.js');
 const ROOT = path.resolve(__dirname, '..');
 const TEMPLATE_DIR = path.join(ROOT, 'templates');
 
-const KNOWN = ['UUID', 'WSPATH', 'HOST', 'UDP_OUTBOUND', 'XUDP_443', 'CA_PEM_LINES'];
+const KNOWN = ['UUID', 'WSPATH', 'HOST', 'UDP_OUTBOUND', 'QUIC_OUTBOUND', 'XUDP_443', 'CA_PEM_LINES'];
 
 // Deliberately fake, and shaped so it cannot be mistaken for a real credential:
 // an all-zero UUID and a ws path that is literal words rather than hex. Both are
@@ -93,13 +93,16 @@ test('no committed template contains a credential', () => {
 
 test('the android template renders exactly what buildXrayConfig produces', () => {
   // Same shape, two implementations: this one for the operator's own configs,
-  // buildXrayConfig for the invitee configs the server hands out. Host and udp
-  // are inputs to both, so a full deepEqual is correct — nothing to exclude.
-  for (const udp of [false, true]) {
+  // buildXrayConfig for the invitee configs the server hands out. Host and the
+  // udp policy are inputs to both, so a full deepEqual is correct — nothing to
+  // exclude. All three policies, so the drop-the-redundant-rule logic in the
+  // renderer and the emit-only-for-noquic logic in buildXrayConfig cannot
+  // disagree.
+  for (const udpPolicy of ['none', 'noquic', 'all']) {
     const rendered = renderer.renderProfile({
       template: 'android-socks.json',
       host: FIXTURE.host,
-      udp,
+      udpPolicy,
       uuid: FIXTURE.uuid,
       wsPath: FIXTURE.wsPath,
       caLines: INTERCEPT_CA_PEM
@@ -110,45 +113,57 @@ test('the android template renders exactly what buildXrayConfig produces', () =>
       host: FIXTURE.host,
       port: 443,
       wsPath: FIXTURE.wsPath,
-      udp
+      udpPolicy
     });
 
-    assert.deepEqual(rendered, built, `udp=${udp}: template and buildXrayConfig disagree`);
+    assert.deepEqual(rendered, built, `${udpPolicy}: template and buildXrayConfig disagree`);
   }
 });
 
 test('rendering substitutes every placeholder', () => {
   for (const template of templateFiles()) {
     const config = renderer.renderProfile({
-      template, host: FIXTURE.host, udp: false,
+      template, host: FIXTURE.host, udpPolicy: 'none',
       uuid: FIXTURE.uuid, wsPath: FIXTURE.wsPath, caLines: INTERCEPT_CA_PEM
     });
     assert.ok(!JSON.stringify(config).includes('${'), `${template}: placeholder survived`);
   }
 });
 
-test('the udp flag drives both halves of the udp axis together', () => {
-  for (const udp of [false, true]) {
+test('the udp policy drives every half of the udp axis together', () => {
+  const expected = {
+    none:   { catchAll: 'block', quic: undefined, xudp: 'reject' },
+    noquic: { catchAll: 'vless', quic: 'block',   xudp: 'reject' },
+    all:    { catchAll: 'vless', quic: undefined, xudp: 'allow' }
+  };
+
+  for (const [udpPolicy, want] of Object.entries(expected)) {
     const config = renderer.renderProfile({
-      template: 'linux-tproxy.json', host: FIXTURE.host, udp,
+      template: 'linux-tproxy.json', host: FIXTURE.host, udpPolicy,
       uuid: FIXTURE.uuid, wsPath: FIXTURE.wsPath, caLines: INTERCEPT_CA_PEM
     });
-    const rule = config.routing.rules.find((r) => r.network === 'udp');
-    assert.equal(rule.outboundTag, udp ? 'vless' : 'block');
-    assert.equal(config.outbounds[0].mux.xudpProxyUDP443, udp ? 'allow' : 'reject');
+    const rules = config.routing.rules;
+    const catchAll = rules.find((r) => r.network === 'udp' && r.port === undefined);
+    const quic = rules.find((r) => r.network === 'udp' && r.port === '443');
+
+    assert.equal(catchAll.outboundTag, want.catchAll, udpPolicy);
+    assert.equal(quic && quic.outboundTag, want.quic, `${udpPolicy}: udp/443 rule`);
+    assert.equal(config.outbounds[0].mux.xudpProxyUDP443, want.xudp, udpPolicy);
+    // A rule left with an empty outboundTag would be silently ignored by Xray.
+    for (const r of rules) assert.ok(r.outboundTag, `${udpPolicy}: rule with no outbound survived`);
   }
 });
 
 test('the CA splices in as separate lines, and an empty CA drops the block', () => {
   const withCa = renderer.renderProfile({
-    template: 'android-socks.json', host: FIXTURE.host, udp: false,
+    template: 'android-socks.json', host: FIXTURE.host, udpPolicy: 'none',
     uuid: FIXTURE.uuid, wsPath: FIXTURE.wsPath, caLines: INTERCEPT_CA_PEM
   });
   const cert = withCa.outbounds[0].streamSettings.tlsSettings.certificates[0].certificate;
   assert.deepEqual(cert, INTERCEPT_CA_PEM, 'the marker must expand to one element per line');
 
   const without = renderer.renderProfile({
-    template: 'android-socks.json', host: FIXTURE.host, udp: false,
+    template: 'android-socks.json', host: FIXTURE.host, udpPolicy: 'none',
     uuid: FIXTURE.uuid, wsPath: FIXTURE.wsPath, caLines: []
   });
   assert.equal('certificates' in without.outbounds[0].streamSettings.tlsSettings, false);
@@ -160,7 +175,7 @@ test('the three host fields always agree', () => {
   // fault rather than a config error.
   for (const template of templateFiles()) {
     const out = renderer.renderProfile({
-      template, host: FIXTURE.host, udp: false,
+      template, host: FIXTURE.host, udpPolicy: 'none',
       uuid: FIXTURE.uuid, wsPath: FIXTURE.wsPath, caLines: INTERCEPT_CA_PEM
     }).outbounds[0];
 

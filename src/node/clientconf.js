@@ -47,16 +47,33 @@ function buildVlessLink({ uuid, host, port = 443, wsPath = '/', label = '' }) {
  * The Android/SOCKS shape, because this is the mobile target and it is the
  * profile already known to work on the intercepting network.
  *
- * `udp` selects between two routing policies:
- *   false (default) — everything but DNS is blackholed locally and
- *     xudpProxyUDP443 is "reject", which pushes browsers straight off QUIC and
- *     onto TCP/TLS. That is what survives a middlebox, and blocked UDP is the
- *     common case on these networks.
- *   true — all UDP goes through the tunnel with xudpProxyUDP443 "allow".
- *     Only useful against a server that carries arbitrary UDP.
+ * `udpPolicy` selects the routing policy for UDP:
+ *
+ *   'noquic' (default) — UDP is tunnelled, except port 443. Games and voice
+ *     chat work; browsers are pushed off QUIC and onto TCP/TLS.
+ *   'none' — everything but DNS is blackholed locally.
+ *   'all' — every UDP goes through, QUIC included, with xudpProxyUDP443
+ *     "allow". Only useful against a server that carries arbitrary UDP.
+ *
+ * Blocking UDP conceals nothing: tunnelled UDP is encapsulated in the
+ * WebSocket/TLS carrier, so the network sees identical bytes under every
+ * policy. 'none' therefore only breaks applications, which is why it is no
+ * longer the default. Refusing QUIC is kept for a different reason — QUIC
+ * carried over a TCP tunnel degrades badly, so forcing TCP/TLS is faster.
  */
-function buildXrayConfig({ uuid, host, port = 443, wsPath = '/', udp = false, ca = null }) {
+function buildXrayConfig({ uuid, host, port = 443, wsPath = '/', udpPolicy = 'noquic', ca = null }) {
   const pem = ca === null ? INTERCEPT_CA_PEM : ca;
+  const udp = udpPolicy === 'noquic' || udpPolicy === 'all';
+
+  // Xray matches first-wins, so the specific udp/443 rule has to precede the
+  // general udp rule. It is emitted only for 'noquic': under 'none' every UDP
+  // is blocked by the general rule anyway, and under 'all' every UDP is
+  // tunnelled, so in both cases it would be dead weight.
+  const rules = [{ network: 'tcp,udp', port: '53', outboundTag: 'vless' }];
+  if (udpPolicy === 'noquic') {
+    rules.push({ network: 'udp', port: '443', outboundTag: 'block' });
+  }
+  rules.push({ network: 'udp', outboundTag: udp ? 'vless' : 'block' });
 
   const tlsSettings = { serverName: host };
   if (pem && pem.length > 0) {
@@ -64,12 +81,7 @@ function buildXrayConfig({ uuid, host, port = 443, wsPath = '/', udp = false, ca
   }
 
   return {
-    routing: {
-      rules: [
-        { network: 'tcp,udp', port: '53', outboundTag: 'vless' },
-        { network: 'udp', outboundTag: udp ? 'vless' : 'block' }
-      ]
-    },
+    routing: { rules },
     inbounds: [
       {
         tag: 'socks-in',
@@ -100,7 +112,7 @@ function buildXrayConfig({ uuid, host, port = 443, wsPath = '/', udp = false, ca
           enabled: true,
           concurrency: 8,
           xudpConcurrency: 1024,
-          xudpProxyUDP443: udp ? 'allow' : 'reject'
+          xudpProxyUDP443: udpPolicy === 'all' ? 'allow' : 'reject'
         }
       },
       { tag: 'block', protocol: 'blackhole' }

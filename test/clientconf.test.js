@@ -91,22 +91,54 @@ test('the config matches the known-good Android profile shape', () => {
   assert.equal(out.mux.xudpConcurrency, 1024);
 });
 
-test('the default profile blackholes UDP and rejects QUIC', () => {
+// Helpers: the catch-all udp rule, and the specific udp/443 one.
+const catchAll = (conf) => conf.routing.rules.find((r) => r.network === 'udp' && r.port === undefined);
+const quicRule = (conf) => conf.routing.rules.find((r) => r.network === 'udp' && r.port === '443');
+
+test('the default tunnels ordinary UDP and refuses QUIC', () => {
+  // This is what makes Roblox and Discord voice work: they are pure UDP on
+  // high ports. Blocking them concealed nothing — tunnelled UDP is
+  // encapsulated in the same WebSocket/TLS carrier either way.
   const conf = buildXrayConfig(ARGS);
-  assert.equal(conf.routing.rules.find((r) => r.network === 'udp').outboundTag, 'block');
+  assert.equal(catchAll(conf).outboundTag, 'vless');
+  assert.equal(quicRule(conf).outboundTag, 'block');
   assert.equal(conf.outbounds[0].mux.xudpProxyUDP443, 'reject');
-  assert.ok(conf.outbounds.some((o) => o.protocol === 'blackhole'));
 });
 
-test('the udp profile tunnels UDP and allows QUIC', () => {
-  const conf = buildXrayConfig({ ...ARGS, udp: true });
-  assert.equal(conf.routing.rules.find((r) => r.network === 'udp').outboundTag, 'vless');
-  assert.equal(conf.outbounds[0].mux.xudpProxyUDP443, 'allow');
+test('the udp/443 rule precedes the catch-all, because Xray matches first-wins', () => {
+  // Reversed, the catch-all would swallow QUIC and send it down the tunnel —
+  // a config that looks right and quietly does the opposite.
+  const rules = buildXrayConfig(ARGS).routing.rules;
+  assert.equal(rules.length, 3);
+  assert.equal(rules[1].port, '443', 'the specific rule must come second, after DNS');
+  assert.equal(rules[1].outboundTag, 'block');
+  assert.equal(rules[2].port, undefined, 'and the catch-all last');
+  assert.equal(rules[2].outboundTag, 'vless');
 });
 
-test('DNS is routed through the tunnel in both profiles', () => {
-  for (const udp of [false, true]) {
-    const rule = buildXrayConfig({ ...ARGS, udp }).routing.rules[0];
+test("'none' blackholes UDP and 'all' tunnels everything", () => {
+  const none = buildXrayConfig({ ...ARGS, udpPolicy: 'none' });
+  assert.equal(catchAll(none).outboundTag, 'block');
+  assert.equal(none.outbounds[0].mux.xudpProxyUDP443, 'reject');
+  assert.ok(none.outbounds.some((o) => o.protocol === 'blackhole'));
+
+  const all = buildXrayConfig({ ...ARGS, udpPolicy: 'all' });
+  assert.equal(catchAll(all).outboundTag, 'vless');
+  assert.equal(all.outbounds[0].mux.xudpProxyUDP443, 'allow');
+});
+
+test('only noquic carries a udp/443 rule — elsewhere it would be dead weight', () => {
+  // Under 'none' the catch-all already blocks it; under 'all' nothing is
+  // blocked. Keeping it out is what leaves the operator's own rendered
+  // configs byte-identical.
+  for (const udpPolicy of ['none', 'all']) {
+    assert.equal(quicRule(buildXrayConfig({ ...ARGS, udpPolicy })), undefined, udpPolicy);
+  }
+});
+
+test('DNS is routed through the tunnel under every policy', () => {
+  for (const udpPolicy of ['none', 'noquic', 'all']) {
+    const rule = buildXrayConfig({ ...ARGS, udpPolicy }).routing.rules[0];
     assert.equal(rule.port, '53');
     assert.equal(rule.outboundTag, 'vless');
   }

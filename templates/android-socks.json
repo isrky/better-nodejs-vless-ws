@@ -8,6 +8,11 @@
       },
       {
         "network": "udp",
+        "port": "443",
+        "outboundTag": "${QUIC_OUTBOUND}"
+      },
+      {
+        "network": "udp",
         "outboundTag": "${UDP_OUTBOUND}"
       }
     ]

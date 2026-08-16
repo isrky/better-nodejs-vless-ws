@@ -123,6 +123,17 @@ export function substitute(node, bindings, path = '$', errors = []) {
  * express — a placeholder cannot delete a key. Mirrors buildXrayConfig's
  * `if (pem && pem.length > 0)` in src/node/clientconf.js.
  */
+function dropBlankQuicRule(config) {
+  // Same shape as dropEmptyCertificates: a placeholder that resolves to empty
+  // removes its block rather than rendering a rule with no outbound. Only the
+  // 'noquic' policy needs a udp/443 rule — under 'none' the general udp rule
+  // already blocks it, and under 'all' nothing is blocked.
+  const rules = config.routing?.rules;
+  if (!Array.isArray(rules)) return;
+  const i = rules.findIndex((r) => r.network === 'udp' && r.port === '443' && !r.outboundTag);
+  if (i !== -1) rules.splice(i, 1);
+}
+
 function dropEmptyCertificates(config) {
   const tls = config.outbounds?.[0]?.streamSettings?.tlsSettings;
   if (tls && Array.isArray(tls.certificates) && tls.certificates[0]?.certificate?.length === 0) {
@@ -220,7 +231,8 @@ export function validateConfig(config, profile) {
 
   // The two halves of the UDP axis must agree. A half-edit is a valid config
   // that simply behaves wrongly, and nothing else would catch it.
-  const udpRule = config.routing.rules.find((r) => r.network === 'udp');
+  // The catch-all udp rule, not the specific udp/443 one that may precede it.
+  const udpRule = config.routing.rules.find((r) => r.network === 'udp' && r.port === undefined);
   const tunnelled = udpRule && udpRule.outboundTag === 'vless';
   const allowed = vless.mux.xudpProxyUDP443 === 'allow';
   if (tunnelled !== allowed) {
@@ -244,15 +256,16 @@ export function validateConfig(config, profile) {
 // Rendering
 // ==========================================
 
-export function renderProfile({ template, host, udp, uuid, wsPath, caLines, root = ROOT }) {
+export function renderProfile({ template, host, udpPolicy, uuid, wsPath, caLines, root = ROOT }) {
   const source = JSON.parse(readFileSync(resolve(root, 'templates', template), 'utf8'));
 
   const bindings = {
     UUID: uuid,
     WSPATH: wsPath,
     HOST: host,
-    UDP_OUTBOUND: udp ? 'vless' : 'block',
-    XUDP_443: udp ? 'allow' : 'reject',
+    UDP_OUTBOUND: udpPolicy === 'none' ? 'block' : 'vless',
+    QUIC_OUTBOUND: udpPolicy === 'noquic' ? 'block' : '',
+    XUDP_443: udpPolicy === 'all' ? 'allow' : 'reject',
     CA_PEM_LINES: caLines
   };
 
@@ -260,6 +273,7 @@ export function renderProfile({ template, host, udp, uuid, wsPath, caLines, root
   const config = substitute(source, bindings, '$', errors);
   if (errors.length) fail(`templates/${template}:\n  ` + errors.join('\n  '));
 
+  dropBlankQuicRule(config);
   dropEmptyCertificates(config);
   return config;
 }
@@ -288,7 +302,7 @@ function renderAll(store) {
     const config = renderProfile({
       template: profile.template,
       host: hosts[profile.hostVar],
-      udp: profile.udp,
+      udpPolicy: profile.udp ? 'all' : 'none',
       uuid,
       wsPath,
       caLines

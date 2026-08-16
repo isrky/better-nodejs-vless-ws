@@ -231,7 +231,25 @@ test('the config download is a valid Xray profile for that user', async (t) => {
     'the interception CA is what a share link cannot carry');
 });
 
-test('the udp variant is a separate download', async (t) => {
+test('the default download carries UDP but refuses QUIC', async (t) => {
+  // The regression this exists for: the old default blackholed all UDP, so a
+  // provisioned device browsed fine and could not use Roblox or Discord voice
+  // — a failure nobody notices until days later.
+  const srv = await start();
+  t.after(() => srv.close());
+  const token = await mint(srv.port, await login(srv.port));
+
+  const { body } = await fetchOf(srv.port, `/i/${token}/conf.json`);
+  const rules = JSON.parse(body.toString()).routing.rules;
+
+  const catchAll = rules.find((r) => r.network === 'udp' && r.port === undefined);
+  const quic = rules.find((r) => r.network === 'udp' && r.port === '443');
+  assert.equal(catchAll.outboundTag, 'vless', 'games and voice must reach the tunnel');
+  assert.equal(quic.outboundTag, 'block');
+  assert.ok(rules.indexOf(quic) < rules.indexOf(catchAll), 'Xray matches first-wins');
+});
+
+test('?udp=1 is still there for anyone who wants QUIC tunnelled too', async (t) => {
   const srv = await start();
   t.after(() => srv.close());
   const token = await mint(srv.port, await login(srv.port));
@@ -240,8 +258,21 @@ test('the udp variant is a separate download', async (t) => {
   assert.match(head, /filename="vless-alice-udp\.json"/);
 
   const conf = JSON.parse(body.toString());
-  assert.equal(conf.routing.rules.find((r) => r.network === 'udp').outboundTag, 'vless');
+  assert.equal(conf.routing.rules.find((r) => r.network === 'udp' && r.port === undefined).outboundTag, 'vless');
+  assert.ok(!conf.routing.rules.some((r) => r.port === '443'), 'no rule to block QUIC');
   assert.equal(conf.outbounds[0].mux.xudpProxyUDP443, 'allow');
+});
+
+test('the reveal page offers exactly one config download', async (t) => {
+  // Two buttons was the footgun: the prominent one was the broken one.
+  const srv = await start();
+  t.after(() => srv.close());
+  const token = await mint(srv.port, await login(srv.port));
+
+  const { body } = await fetchOf(srv.port, `/i/${token}/show`);
+  const html = body.toString();
+  assert.equal((html.match(/conf\.json/g) || []).length, 1);
+  assert.ok(!html.includes('udp=1'), 'the escape hatch stays unadvertised');
 });
 
 test('a revoked user reads exactly like an expired invite', async (t) => {
@@ -313,7 +344,7 @@ test('a hostile label cannot break out of the page or the filename', async (t) =
   assert.ok(!picker.includes('<img onerror'));
 
   const reveal = renderRevealPage({
-    label: hostile, link: 'vless://x@y:443', confUrl: '/a', confUdpUrl: '/b'
+    label: hostile, link: 'vless://x@y:443', confUrl: '/a'
   });
   assert.ok(!reveal.includes('</script><script>alert'));
   assert.ok(!reveal.includes('<img onerror'));

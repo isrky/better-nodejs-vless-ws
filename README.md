@@ -199,13 +199,15 @@ uuid(label) = HMAC-SHA256(PROVISION_SECRET, "vless-uuid-v1\n" + label)[0..16]
 Nothing is written to disk, which matters because Fly machines have no volume — a users file would work in testing and vanish on the next deploy. The whole registry is reproducible from two secrets.
 
 ```bash
-fly secrets set PROVISION_SECRET="$(openssl rand -base64 32)" USERS=alice,bob
+fly secrets set PROVISION_SECRET="$(openssl rand -hex 32)" USERS=alice,bob
 fly secrets set PUBLIC_HOST=edge.example.com
 ```
 
 Then open `/admin-stats/provision`, pick a user, and send them the link. It expires in 15 minutes.
 
 **What the invitee gets.** The landing page carries no credential — chat apps fetch pasted URLs to build previews, and burning the invite there would kill it before the human taps. Tapping through reveals a `vless://` link (one tap into v2rayNG, Streisand, Hiddify or NekoBox), a QR of it, and a **full JSON config download**. The download exists because a share link structurally cannot carry a certificate: on a [TLS-intercepting network](#networks-that-intercept-tls) only the JSON works.
+
+That config tunnels UDP, so games and voice chat — Roblox, Discord — work. QUIC (UDP/443) is the one exception: it is blocked so browsers stay on TCP/TLS, because QUIC carried over a WebSocket/TCP tunnel degrades badly. Append `?udp=1` to the download URL to tunnel QUIC as well.
 
 **Revoking.** Drop the label from `USERS` and redeploy. Their credential stops authenticating immediately, including any live tunnel, and nobody else is affected.
 

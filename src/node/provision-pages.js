@@ -213,7 +213,7 @@ function renderInvitePage({ showUrl }) {
 }
 
 /** The reveal page: this is the one that actually hands over a credential. */
-function renderRevealPage({ label, link, confUrl, confUdpUrl }) {
+function renderRevealPage({ label, link, confUrl }) {
   return page({
     title: 'Your connection',
     qr: true,
@@ -234,12 +234,9 @@ ${qrBlock(link)}
             <p>If the link above connects but nothing loads, that network inspects
             TLS. Use this file instead &mdash; it includes the certificate such a
             network requires, which a share link cannot carry.</p>
-            <p>
-                <a href="${escapeHtml(confUrl)}" role="button" class="secondary">Download configuration</a>
-                <a href="${escapeHtml(confUdpUrl)}" class="secondary outline" role="button">Download (with UDP)</a>
-            </p>
+            <p><a href="${escapeHtml(confUrl)}" role="button" class="secondary">Download configuration</a></p>
             <p><small>Import it as a <strong>Custom config</strong> in your client.
-            Pick the UDP version only if you need games or voice chat.</small></p>
+            Games and voice chat work with this file.</small></p>
         </article>
 
         <p><small>This page stops working in a few minutes.</small></p>`

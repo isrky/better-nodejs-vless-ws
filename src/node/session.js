@@ -542,7 +542,10 @@ class Session {
       host,
       port: this.config.publicPort,
       wsPath: this.config.wsPath,
-      udp: params.get('udp') === '1'
+      // Default carries UDP but refuses QUIC: games and voice chat work, while
+      // browsers stay on TCP/TLS. ?udp=1 is an unadvertised escape hatch for
+      // anyone who wants QUIC tunnelled too.
+      udpPolicy: params.get('udp') === '1' ? 'all' : 'noquic'
     };
 
     if (action === '/conf.json') {
@@ -550,7 +553,7 @@ class Session {
         ...profile,
         ca: this.config.interceptCa ? this.config.interceptCa.split('\\n') : null
       }), null, 2);
-      const name = `vless-${user.label}${profile.udp ? '-udp' : ''}.json`;
+      const name = `vless-${user.label}${profile.udpPolicy === 'all' ? '-udp' : ''}.json`;
       this.log('PROVISION', `Config downloaded for ${user.label}`);
       sendHttpResponse(this.#client, 200, JSON_TYPE, body, [
         `Content-Disposition: attachment; filename="${name}"`,
@@ -563,8 +566,7 @@ class Session {
     sendHttpResponse(this.#client, 200, HTML, renderRevealPage({
       label: user.label,
       link: buildVlessLink({ ...profile, label: user.label }),
-      confUrl: this.config.invitePath + token + '/conf.json',
-      confUdpUrl: this.config.invitePath + token + '/conf.json?udp=1'
+      confUrl: this.config.invitePath + token + '/conf.json'
     }), ['Referrer-Policy: no-referrer']);
     this.destroy('Invite revealed');
   }
