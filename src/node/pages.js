@@ -124,11 +124,24 @@ const TABLE_HEAD = `
                 <thead>
                     <tr>
                         <th scope="col">ID</th>
+                        <th scope="col">User</th>
                         <th scope="col">Status</th>
                         <th scope="col">Duration</th>
                         <th scope="col">Streams</th>
                         <th scope="col">Target</th>
                         <th scope="col">Protocol</th>
+                    </tr>
+                </thead>`;
+
+const USERS_TABLE_HEAD = `
+                <thead>
+                    <tr>
+                        <th scope="col">User</th>
+                        <th scope="col">Active</th>
+                        <th scope="col">Total</th>
+                        <th scope="col">Streams</th>
+                        <th scope="col">Sent</th>
+                        <th scope="col">Received</th>
                     </tr>
                 </thead>`;
 
@@ -172,7 +185,7 @@ const CLIENT_JS = `
     if (!list || !list.length) {
       var empty = document.createElement('tr');
       var cell = document.createElement('td');
-      cell.colSpan = 6;
+      cell.colSpan = 7;
       cell.textContent = isActive ? 'No active connections' : 'No connection history';
       empty.appendChild(cell);
       tbody.appendChild(empty);
@@ -184,6 +197,7 @@ const CLIENT_JS = `
       var tr = document.createElement('tr');
       var cells = [
         '#' + c.id,
+        c.label || 'owner',
         isActive ? 'Active' : 'Closed',
         formatDuration(c.durationSeconds),
         String(c.streams || 0),
@@ -193,6 +207,38 @@ const CLIENT_JS = `
       for (var j = 0; j < cells.length; j++) {
         var td = document.createElement('td');
         td.textContent = cells[j];   // the ONLY place snapshot data enters the DOM
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+  }
+
+  function userRows(tbody, list) {
+    if (!tbody) return;
+    tbody.replaceChildren();
+    if (!list || !list.length) {
+      var empty = document.createElement('tr');
+      var cell = document.createElement('td');
+      cell.colSpan = 6;
+      cell.textContent = 'No users configured';
+      empty.appendChild(cell);
+      tbody.appendChild(empty);
+      return;
+    }
+    for (var i = 0; i < list.length; i++) {
+      var u = list[i];
+      var tr = document.createElement('tr');
+      var cells = [
+        u.label,
+        String(u.active),
+        String(u.total),
+        String(u.streams),
+        formatMb(u.bytesTx),
+        formatMb(u.bytesRx)
+      ];
+      for (var j = 0; j < cells.length; j++) {
+        var td = document.createElement('td');
+        td.textContent = cells[j];
         tr.appendChild(td);
       }
       tbody.appendChild(tr);
@@ -212,6 +258,7 @@ const CLIENT_JS = `
     put('uptimeSeconds', formatDuration(s.uptimeSeconds));
     rows($('active-rows'), s.active, true);
     rows($('history-rows'), s.history, false);
+    userRows($('user-rows'), s.users);
   }
 
   var seed = $('snapshot');
@@ -252,6 +299,15 @@ function renderStatsPage(snapshot, wsPath) {
         </hgroup>
 
         <section class="stats">${renderCards(snapshot, wsPath)}
+        </section>
+
+        <section>
+            <h2>Users</h2>
+            <div class="tables">
+                <table>${USERS_TABLE_HEAD}
+                    <tbody id="user-rows"></tbody>
+                </table>
+            </div>
         </section>
 
         <section>

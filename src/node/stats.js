@@ -9,16 +9,37 @@
 // The counters are updated from a single thread with no await between
 // read and write, so they need no locking.
 
+function blankUser(label) {
+  return { label, active: 0, total: 0, streams: 0, bytesTx: 0, bytesRx: 0 };
+}
+
 // How many closed connections to retain for the history table.
 const MAX_HISTORY = 100;
 
 // How many of them the dashboard shows, newest first.
 const HISTORY_SHOWN = 20;
 
-function createStats(now = Date.now) {
+function createStats(now = Date.now, options = {}) {
   const startTime = now();
 
   let connectionCounter = 0;
+
+  // Per-user totals, pre-seeded from the configured labels so a provisioned
+  // user who has never connected still shows as a row of zeros — "has Bob
+  // actually set it up yet?" is the question an operator actually asks.
+  const byUser = new Map();
+  for (const label of options.labels || []) byUser.set(label, blankUser(label));
+
+  function userRow(label) {
+    let row = byUser.get(label);
+    if (row === undefined) {
+      // Bounded by MAX_USERS in users.js, plus the owner.
+      if (byUser.size > 128) return null;
+      row = blankUser(label);
+      byUser.set(label, row);
+    }
+    return row;
+  }
 
   const totals = {
     totalConnections: 0,
@@ -35,11 +56,18 @@ function createStats(now = Date.now) {
   const connections = new Map();
   const history = [];
 
-  /** Register a new client connection and return its mutable record. */
-  function openConnection() {
+  /**
+   * Register a new client connection and return its mutable record.
+   *
+   * `label` names the provisioned user whose credential authenticated this
+   * tunnel, or '' for the operator's own. Defaults so existing callers and
+   * tests that pass nothing keep working.
+   */
+  function openConnection(label = '') {
     connectionCounter += 1;
     const info = {
       id: connectionCounter,
+      label,
       active: true,
       startTime: now(),
       endTime: 0,
@@ -52,6 +80,10 @@ function createStats(now = Date.now) {
     connections.set(info.id, info);
     totals.totalConnections += 1;
     totals.activeConnections += 1;
+
+    const row = userRow(label);
+    if (row) { row.active += 1; row.total += 1; }
+
     return info;
   }
 
@@ -67,6 +99,9 @@ function createStats(now = Date.now) {
 
     totals.activeConnections -= 1;
     connections.delete(info.id);
+
+    const row = byUser.get(info.label || '');
+    if (row && row.active > 0) row.active -= 1;
 
     history.push(info);
     if (history.length > MAX_HISTORY) history.shift();
@@ -87,6 +122,9 @@ function createStats(now = Date.now) {
 
     totals.totalStreams += 1;
     totals.activeStreams += 1;
+
+    const row = info ? byUser.get(info.label || '') : null;
+    if (row) row.streams += 1;
     if (proto === 'TCP') totals.tcpStreams += 1;
     else if (proto === 'UDP') totals.udpStreams += 1;
 
@@ -108,6 +146,9 @@ function createStats(now = Date.now) {
     if (record) record.txBytes += n;
     if (info) info.bytesTx += n;
     totals.totalBytesTx += n;
+
+    const row = info ? byUser.get(info.label || '') : null;
+    if (row) row.bytesTx += n;
   }
 
   function addRx(info, record, bytes) {
@@ -115,6 +156,9 @@ function createStats(now = Date.now) {
     if (record) record.rxBytes += n;
     if (info) info.bytesRx += n;
     totals.totalBytesRx += n;
+
+    const row = info ? byUser.get(info.label || '') : null;
+    if (row) row.bytesRx += n;
   }
 
   function noteMuxSession() {
@@ -124,6 +168,7 @@ function createStats(now = Date.now) {
   function describe(info, at) {
     return {
       id: info.id,
+      label: info.label || '',
       durationSeconds: Math.floor(((info.active ? at : info.endTime) - info.startTime) / 1000),
       streams: info.streams,
       lastHost: info.lastHost,
@@ -148,7 +193,13 @@ function createStats(now = Date.now) {
       uptimeSeconds: Math.floor((at - startTime) / 1000),
       ...totals,
       active,
-      history: recent
+      history: recent,
+      // Sorted by traffic so the heaviest user is first; the operator's own
+      // connections carry label '' and are shown as "owner".
+      users: [...byUser.values()]
+        .sort((a, b) => (b.bytesTx + b.bytesRx) - (a.bytesTx + a.bytesRx))
+        .slice(0, 50)
+        .map((u) => ({ ...u, label: u.label || 'owner' }))
     };
   }
 

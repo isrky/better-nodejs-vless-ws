@@ -144,10 +144,10 @@ function decodeChunked(body) {
 }
 
 /** Read `count` `data:` events from an SSE endpoint and return them parsed. */
-async function readSseEvents(port, path, count = 1, timeoutMs = 6000) {
+async function readSseEvents(port, path, count = 1, timeoutMs = 6000, cookie = '') {
   const raw = await rawRequestUntil(
     port,
-    get(path),
+    get(path, cookie ? `Cookie: ${cookie}\r\n` : ''),
     (buf) => {
       const { body } = splitResponse(buf);
       return (decodeChunked(body).toString('utf8').match(/^data: /gm) || []).length >= count;

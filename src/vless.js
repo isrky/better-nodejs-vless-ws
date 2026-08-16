@@ -44,22 +44,48 @@ function fail(reason) {
   return { status: 'fail', reason };
 }
 
+// Hoisted: a probe flood hits this path, and there is no reason to allocate a
+// fresh object per rejected connection.
+const FAIL_UUID = fail('UUID Mismatch');
+
+// Stand-in identity for the single-credential form, so callers never have to
+// branch on which kind of `auth` they passed.
+const ANON_USER = Object.freeze({ label: '' });
+
+function matchBytes(payload, off, uuidBytes) {
+  for (let i = 0; i < 16; i++) {
+    if (payload[off + i] !== uuidBytes[i]) return null;
+  }
+  return ANON_USER;
+}
+
+/** Wrap one 16-byte credential in the registry shape. */
+function createSingleUserAuth(uuidBytes) {
+  return { lookup: (payload, off) => matchBytes(payload, off, uuidBytes) };
+}
+
 /**
  * Parse a VLESS request header.
  *
  * Returns {status:'need'} when more bytes are required, {status:'fail',reason}
  * when the request must be rejected, or {status:'ok', cmd, host, port,
- * headerEnd} on success. `headerEnd` is the offset where payload begins.
+ * headerEnd, user} on success. `headerEnd` is the offset where payload begins.
  *
  * cmd 1 = TCP, 2 = UDP, 3 = Mux.Cool (which carries no address of its own).
+ *
+ * `auth` is either a 16-byte Uint8Array (one credential — what the Worker
+ * build passes) or an object with `lookup(payload, offset) -> user | null`
+ * (the Node build's multi-user registry). The property probe costs one
+ * prototype-chain miss per connection, not per packet.
  */
-function parseVlessHeader(payload, uuidBytes) {
+function parseVlessHeader(payload, auth) {
   if (payload.length < 18) return NEED;
   if (payload[0] !== 0) return fail('Bad Version');
 
-  for (let i = 0; i < 16; i++) {
-    if (payload[1 + i] !== uuidBytes[i]) return fail('UUID Mismatch');
-  }
+  const user = auth.lookup !== undefined
+    ? auth.lookup(payload, 1)
+    : matchBytes(payload, 1, auth);
+  if (user === null) return FAIL_UUID;
 
   const optLen = payload[17];
   let pos = 18 + optLen;
@@ -69,7 +95,7 @@ function parseVlessHeader(payload, uuidBytes) {
   pos += 1;
 
   // Mux.Cool addresses each substream inside its own frames.
-  if (cmd === 3) return { status: 'ok', cmd, host: '0.0.0.0', port: 0, headerEnd: pos };
+  if (cmd === 3) return { status: 'ok', cmd, host: '0.0.0.0', port: 0, headerEnd: pos, user };
 
   if (cmd !== 1 && cmd !== 2) return fail('Unknown Command: ' + cmd);
 
@@ -108,7 +134,7 @@ function parseVlessHeader(payload, uuidBytes) {
 
   if (isBlockedDomain(host)) return fail('Blocked Domain: ' + host);
 
-  return { status: 'ok', cmd, host, port, headerEnd: pos };
+  return { status: 'ok', cmd, host, port, headerEnd: pos, user };
 }
 
 /**
@@ -249,10 +275,12 @@ function concat(a, b) {
 }
 
 module.exports = {
+  ANON_USER,
   BLOCKED_DOMAINS,
   ByteQueue,
   VLESS_OK_HEADER,
   concat,
+  createSingleUserAuth,
   isBlockedDomain,
   parseMuxAddress,
   parseVlessHeader,

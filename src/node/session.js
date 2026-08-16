@@ -34,10 +34,19 @@ const {
 
 const { OPCODE, decodeFrame, encodeFrame, encodeMuxFrame } = require('./wsframe.js');
 const {
-  indexOfHeaderEnd, parseRequestHead, sendHttpResponse, writeUpgradeResponse,
-  sendEventStreamHead, sendSseRetry, sendSseComment, sendSseEvent
+  indexOfHeaderEnd, parseRequestHead, parseCookies, sendHttpResponse, sendRedirect,
+  writeUpgradeResponse, sendEventStreamHead, sendSseRetry, sendSseComment, sendSseEvent
 } = require('./http.js');
+const {
+  tokensMatch, mintSession, verifySession, mintInvite, verifyInvite
+} = require('./tokens.js');
+const { randomBytes } = require('crypto');
+const { clientIp } = require('./ratelimit.js');
 const { FAKE_INDEX_HTML, renderStatsPage } = require('./pages.js');
+const {
+  renderProvisionPage, renderInvitePage, renderRevealPage, renderStalePage
+} = require('./provision-pages.js');
+const { buildVlessLink, buildXrayConfig } = require('./clientconf.js');
 const { createTcpRelay } = require('./relay.js');
 const { createUdpRelay } = require('./udp.js');
 const { createMuxSession } = require('./mux.js');
@@ -50,6 +59,16 @@ const STATE_SSE = 'SSE';
 
 const ADMIN_PATH = '/admin-stats';
 const ADMIN_STREAM_PATH = '/admin-stats/stream';
+const ADMIN_PROVISION_PATH = '/admin-stats/provision';
+
+const JSON_TYPE = 'application/json; charset=utf-8';
+
+// How long a redeemed invite keeps working, so a reflexive pull-to-refresh on a
+// phone does not lose the config for good.
+const INVITE_GRACE_MS = 5 * 60 * 1000;
+
+// Only ever used to name a downloaded file and to label a profile.
+const SAFE_LABEL = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 // One snapshot per second. The uptime counter advancing is also the cheapest
 // possible "this page is live" signal, and 1 Hz is far inside every proxy idle
@@ -90,6 +109,7 @@ class Session {
     this.stats = deps.stats;
     this.dns = deps.dns;
     this.log = deps.log;
+    this.deps = deps;
     // Allocated only once a VLESS header validates — see #onMessage().
     this.connInfo = null;
   }
@@ -217,9 +237,22 @@ class Session {
 
     if (req.basePath === ADMIN_PATH) return this.#serveAdminStats(req);
     if (req.basePath === ADMIN_STREAM_PATH) return this.#serveAdminStream(req);
+    if (req.basePath === ADMIN_PROVISION_PATH) return this.#serveProvision(req);
 
     const upgrade = req.headers.upgrade;
-    if (req.method !== 'GET' || !upgrade || upgrade.toLowerCase() !== 'websocket') {
+    const upgrading = Boolean(upgrade) && upgrade.toLowerCase() === 'websocket';
+
+    // Invite paths carry a variable segment, so this is the one prefix match in
+    // the router. The !upgrading guard is load-bearing: the WebSocket path is
+    // matched by substring, so a WSPATH containing the invite prefix would
+    // otherwise have every real tunnel swallowed and served the decoy — silently,
+    // with no log line. server.js warns at boot if the two can collide.
+    if (!upgrading && this.config.provisioning &&
+        req.basePath.startsWith(this.config.invitePath)) {
+      return this.#serveInvite(req);
+    }
+
+    if (req.method !== 'GET' || !upgrading) {
       return this.#serveDecoy(200, 'Not WS Request - served fake page');
     }
 
@@ -242,26 +275,281 @@ class Session {
   }
 
   /**
-   * The gate for both admin routes. Shared so the two cannot drift apart —
-   * a stream that authorised more loosely than the page would be a silent hole.
+   * Is this connection carrying TLS end-to-end?
+   *
+   * Fly terminates TLS at its proxy, so on Fly the socket is plaintext and
+   * X-Forwarded-Proto is the only signal — trusted only when we know we are
+   * behind that proxy. Locally over http:// a Secure cookie cannot be set at
+   * all, which is why the cookie name differs by scheme.
    */
-  #adminAuthorised(req) {
-    if (req.method !== 'GET') return false;
-    if (!this.config.adminToken) return false;
+  #isSecure(req) {
+    if (this.#client.encrypted) return true;
+    if (!this.config.trustProxy) return false;
+    const proto = req.headers['x-forwarded-proto'];
+    return Boolean(proto) && proto.split(',')[0].trim() === 'https';
+  }
+
+  #cookieName(req) {
+    // __Host- is browser-ENFORCED (Secure, Path=/, no Domain), so a sibling
+    // subdomain cannot plant it. It is only legal on a secure origin.
+    return this.#isSecure(req) ? '__Host-adm' : 'adm';
+  }
+
+  /**
+   * The gate for every admin route. Shared so they cannot drift apart — a
+   * stream that authorised more loosely than the page would be a silent hole.
+   *
+   * Tri-state so the caller knows whether to upgrade a query bootstrap into a
+   * cookie: 'cookie' | 'query' | null.
+   */
+  #adminAuth(req) {
+    if (req.method !== 'GET') return null;
+    if (!this.config.adminToken) return null;
+
+    // Only ever accept the cookie name that matches this connection's scheme,
+    // or a downgrade attacker could plant the plain name and have it honoured
+    // over TLS.
+    const jar = parseCookies(req.headers.cookie);
+    if (verifySession(this.config.sessionKey, jar[this.#cookieName(req)])) return 'cookie';
+
     const token = req.query ? new URLSearchParams(req.query).get('token') : null;
-    return tokensMatch(token, this.config.adminToken);
+    return tokensMatch(token, this.config.adminToken) ? 'query' : null;
+  }
+
+  #adminAuthorised(req) {
+    return this.#adminAuth(req) !== null;
+  }
+
+  /**
+   * Charge a failed attempt against the caller's budget.
+   *
+   * Over the limit still serves the decoy rather than a 429: a distinct status
+   * would make the endpoint tellable apart from `GET /`, which is the whole
+   * property these routes are built around.
+   *
+   * The log line is charged to the same bucket, so a probe flood cannot fill
+   * the platform's log budget either.
+   */
+  #noteFailure(req, kind) {
+    const limits = this.deps.limits;
+    if (!limits) return;
+    const ip = clientIp(req, this.#client, this.config);
+    if (limits.adminFail.allow(`${kind}:${ip}`)) {
+      this.log('AUTH-FAIL', `${kind} rejected for ${ip}`);
+    }
+  }
+
+  #setCookieLine(req, value, maxAge) {
+    const attrs = `Max-Age=${maxAge}; Path=/; HttpOnly; SameSite=Strict`;
+    return this.#isSecure(req)
+      ? `Set-Cookie: __Host-adm=${value}; ${attrs}; Secure`
+      : `Set-Cookie: adm=${value}; ${attrs}`;
+  }
+
+  /**
+   * Rebuild this request's URL without the token.
+   *
+   * basePath is a compile-time constant on every branch that calls this (the
+   * dispatch is exact-equality), and URLSearchParams percent-encodes, so the
+   * Location is fully server-controlled and CRLF injection into it is
+   * structurally impossible.
+   */
+  #cleanUrl(req) {
+    const params = new URLSearchParams(req.query || '');
+    params.delete('token');
+    const rest = params.toString();
+    return rest ? `${req.basePath}?${rest}` : req.basePath;
+  }
+
+  /**
+   * Trade a ?token= bootstrap for a session cookie and redirect to a clean URL.
+   *
+   * This is what keeps the credential out of browser history, bookmarks and the
+   * Referer sent to the CDN. The cookie carries a signed, expiring assertion
+   * rather than the token itself, so one lifted from a device backup cannot be
+   * replayed as ?token=.
+   */
+  #exchangeForCookie(req) {
+    const value = mintSession(this.config.sessionKey, this.config.sessionTtl);
+    sendRedirect(this.#client, this.#cleanUrl(req),
+      [this.#setCookieLine(req, value, this.config.sessionTtl)]);
+    this.destroy('Admin session established');
   }
 
   #serveAdminStats(req) {
-    if (!this.#adminAuthorised(req)) {
+    const auth = this.#adminAuth(req);
+    if (!auth) {
       // Unset token or mismatch: hide the endpoint behind the decoy page so its
       // existence — and the wsPath it prints — is not disclosed.
+      this.#noteFailure(req, 'admin');
       return this.#serveDecoy(200, 'Admin stats gated - served fake page');
     }
+
+    // Explicit sign-out, the only way to drop a session from a shared device.
+    if (req.query && new URLSearchParams(req.query).get('logout') === '1') {
+      sendRedirect(this.#client, req.basePath, [this.#setCookieLine(req, '', 0)]);
+      return this.destroy('Admin session cleared');
+    }
+
+    if (auth === 'query') return this.#exchangeForCookie(req);
 
     sendHttpResponse(this.#client, 200, HTML,
       renderStatsPage(this.stats.snapshot(), this.config.wsPath));
     this.destroy('Admin stats served');
+  }
+
+  // ----- provisioning -----
+
+  /** The public origin generated configs should point at. */
+  #publicHost(req) {
+    if (this.config.publicHost) return this.config.publicHost;
+    // Fall back to the Host header only when PUBLIC_HOST is unset, and only if
+    // it is a plausible hostname — it is client-controlled, so a bad value must
+    // produce no config rather than a config pointing somewhere unexpected.
+    const raw = String(req.headers.host || '').split(':')[0].trim().toLowerCase();
+    return /^[a-z0-9.-]{1,253}$/.test(raw) ? raw : '';
+  }
+
+  #inviteUrl(req, token, suffix = '') {
+    const host = req.headers.host || this.#publicHost(req);
+    const scheme = this.#isSecure(req) ? 'https' : 'http';
+    return `${scheme}://${host}${this.config.invitePath}${token}${suffix}`;
+  }
+
+  /** Operator page: pick a user, mint a short-lived invite. */
+  #serveProvision(req) {
+    const auth = this.#adminAuth(req);
+    if (!auth || !this.config.provisioning) {
+      if (!auth) this.#noteFailure(req, 'admin');
+      return this.#serveDecoy(200, 'Provision gated - served fake page');
+    }
+    if (auth === 'query') return this.#exchangeForCookie(req);
+
+    const params = new URLSearchParams(req.query || '');
+    const label = params.get('label');
+
+    let minted = null;
+    const user = label ? this.config.registry.mintable(label) : null;
+    if (label && !user) {
+      // An unknown or reserved label is a probe or a stale form; say nothing.
+      return this.#serveDecoy(200, 'Provision unknown label - served fake page');
+    }
+
+    if (user) {
+      const nonce = randomBytes(6).toString('base64url');
+      const { token, exp } = mintInvite(
+        this.config.inviteKey, user.label, this.config.inviteTtl, nonce
+      );
+      minted = {
+        label: user.label,
+        url: this.#inviteUrl(req, token),
+        expiresAt: new Date(exp * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC'
+      };
+      this.log('PROVISION', `Invite minted for ${user.label}, expires ${minted.expiresAt}`);
+    }
+
+    sendHttpResponse(this.#client, 200, HTML, renderProvisionPage({
+      labels: this.config.registry.labels,
+      minted,
+      publicHost: this.config.publicHost,
+      adminPath: ADMIN_PROVISION_PATH
+    }));
+    this.destroy('Provision page served');
+  }
+
+  /**
+   * Invitee routes: /i/<token>, /i/<token>/show and /i/<token>/conf.json.
+   *
+   * A bad signature is served the decoy — byte-identical to GET / — so probing
+   * this prefix cannot reveal that provisioning exists. A VALID signature that
+   * is merely expired gets a real page, because the signature proves the
+   * operator minted it and telling that holder discloses nothing new.
+   */
+  #serveInvite(req) {
+    const limits = this.deps.limits;
+    if (limits) {
+      const ip = clientIp(req, this.#client, this.config);
+      // Per-caller, plus a global bucket so a distributed probe cannot flood
+      // the decoy path either.
+      if (!limits.invite.allow(ip) || !limits.global.allow('invite')) {
+        return this.#serveDecoy(200, 'Invite rate limited - served fake page');
+      }
+    }
+
+    const rest = req.basePath.slice(this.config.invitePath.length);
+    const slash = rest.indexOf('/');
+    const token = slash === -1 ? rest : rest.slice(0, slash);
+    const action = slash === -1 ? '' : rest.slice(slash);
+
+    if (action !== '' && action !== '/show' && action !== '/conf.json') {
+      return this.#serveDecoy(200, 'Invite unknown action - served fake page');
+    }
+
+    const result = verifyInvite(this.config.inviteKey, token);
+    if (result.reason === 'forged') {
+      this.#noteFailure(req, 'invite');
+      return this.#serveDecoy(200, 'Invite forged - served fake page');
+    }
+
+    const stale = () => {
+      sendHttpResponse(this.#client, 200, HTML, renderStalePage());
+      this.destroy('Invite stale');
+    };
+
+    if (!result.ok) return stale();
+
+    // The landing page burns nothing: chat clients fetch a pasted URL to build
+    // a preview, and burning here would kill the invite before the human taps.
+    if (action === '') {
+      sendHttpResponse(this.#client, 200, HTML, renderInvitePage({
+        showUrl: this.config.invitePath + token + '/show'
+      }));
+      return this.destroy('Invite landing served');
+    }
+
+    const user = this.config.registry.mintable(result.label);
+    // Revoked reads exactly like expired — distinguishing would confirm which
+    // labels once existed.
+    if (!user || !SAFE_LABEL.test(user.label)) return stale();
+
+    if (!this.deps.burn.claim(result.nonce, result.exp * 1000, INVITE_GRACE_MS)) {
+      return stale();
+    }
+
+    const host = this.#publicHost(req);
+    if (!host) return stale();
+
+    const params = new URLSearchParams(req.query || '');
+    const profile = {
+      uuid: user.uuid,
+      host,
+      port: this.config.publicPort,
+      wsPath: this.config.wsPath,
+      udp: params.get('udp') === '1'
+    };
+
+    if (action === '/conf.json') {
+      const body = JSON.stringify(buildXrayConfig({
+        ...profile,
+        ca: this.config.interceptCa ? this.config.interceptCa.split('\\n') : null
+      }), null, 2);
+      const name = `vless-${user.label}${profile.udp ? '-udp' : ''}.json`;
+      this.log('PROVISION', `Config downloaded for ${user.label}`);
+      sendHttpResponse(this.#client, 200, JSON_TYPE, body, [
+        `Content-Disposition: attachment; filename="${name}"`,
+        'Referrer-Policy: no-referrer'
+      ]);
+      return this.destroy('Invite config served');
+    }
+
+    this.log('PROVISION', `Invite revealed for ${user.label}`);
+    sendHttpResponse(this.#client, 200, HTML, renderRevealPage({
+      label: user.label,
+      link: buildVlessLink({ ...profile, label: user.label }),
+      confUrl: this.config.invitePath + token + '/conf.json',
+      confUdpUrl: this.config.invitePath + token + '/conf.json?udp=1'
+    }), ['Referrer-Policy: no-referrer']);
+    this.destroy('Invite revealed');
   }
 
   /**
@@ -371,7 +659,9 @@ class Session {
     // parser has enough to decide.
     this.#message.push(message);
     const buf = this.#message.flatten();
-    const result = parseVlessHeader(buf, this.config.uuidBytes);
+    // The registry matches any provisioned credential and reports which one,
+    // so traffic can be attributed to a person rather than to the server.
+    const result = parseVlessHeader(buf, this.config.registry);
 
     if (result.status === 'need') return;
 
@@ -388,7 +678,7 @@ class Session {
     // totalConnections or push rows into the history table — the dashboard used
     // to pollute its own data at ~12 rows a minute. Must happen before any
     // relay is constructed: relays read session.connInfo synchronously.
-    this.connInfo = this.stats.openConnection();
+    this.connInfo = this.stats.openConnection(result.user ? result.user.label : '');
 
     const initial = buf.slice(result.headerEnd);
     this.#message.clear();
@@ -405,23 +695,10 @@ class Session {
   }
 }
 
-/**
- * Constant-time token comparison.
- *
- * A plain `===` on strings short-circuits at the first differing character,
- * which leaks the admin token one byte at a time to anyone who can time the
- * response.
- */
-function tokensMatch(given, expected) {
-  if (typeof given !== 'string') return false;
-  const a = Buffer.from(given, 'utf8');
-  const b = Buffer.from(expected, 'utf8');
-  if (a.length !== b.length) return false;
-  return require('crypto').timingSafeEqual(a, b);
-}
-
 function handleConnection(client, deps) {
   return new Session(client, deps).start();
 }
 
+// tokensMatch now lives in tokens.js alongside the rest of the signing code;
+// re-exported here because that is where callers and tests already import it.
 module.exports = { Session, handleConnection, tokensMatch };

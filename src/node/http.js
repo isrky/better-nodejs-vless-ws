@@ -24,8 +24,42 @@ const STATUS_TEXT = {
   400: 'Bad Request',
   301: 'Moved Permanently',
   302: 'Found',
+  303: 'See Other',
   404: 'Not Found'
 };
+
+/**
+ * Render extra header lines, dropping any that could smuggle a second header.
+ *
+ * Every value passed here is server-generated from a constrained charset, so a
+ * dropped line is unreachable in practice — which is exactly why this filters
+ * rather than throws: an exception inside a response writer would turn an
+ * unreachable branch into a dropped connection.
+ */
+function safeHeaderLines(extra) {
+  if (!extra || extra.length === 0) return '';
+  return extra
+    .filter((line) => typeof line === 'string' && line.length > 0 && !/[\r\n\0]/.test(line))
+    .map((line) => line + '\r\n')
+    .join('');
+}
+
+/**
+ * Parse a Cookie header into a plain object.
+ *
+ * Object.create(null) matters: a cookie literally named __proto__ or
+ * constructor must not poison the lookup.
+ */
+function parseCookies(header) {
+  const out = Object.create(null);
+  if (!header) return out;
+  for (const part of String(header).split(';')) {
+    const eq = part.indexOf('=');
+    if (eq <= 0) continue;
+    out[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
+  }
+  return out;
+}
 
 /**
  * Index of the \r\n\r\n that terminates the request head, or -1.
@@ -88,7 +122,7 @@ function getAcceptKey(key) {
     .digest('base64');
 }
 
-function sendHttpResponse(client, status, contentType, body) {
+function sendHttpResponse(client, status, contentType, body, extraHeaders) {
   // byteLength, not .length: the body is written as UTF-8, so a string
   // containing any non-ASCII character (an IDN hostname on the stats page, for
   // instance) is longer in bytes than in JS characters, and declaring the
@@ -98,19 +132,29 @@ function sendHttpResponse(client, status, contentType, body) {
                   `Content-Length: ${Buffer.byteLength(body)}\r\n` +
                   `Connection: close\r\n` +
                   `Cache-Control: no-cache, no-store, must-revalidate\r\n` +
+                  safeHeaderLines(extraHeaders) +
                   `\r\n`;
   try {
     client.write(headers + body);
   } catch (e) { /* client already gone */ }
 }
 
-function sendRedirect(client, location) {
+/**
+ * A 303 redirect.
+ *
+ * no-store is not optional here: this response can carry Set-Cookie, and a
+ * cached redirect handing a session to the next visitor would be nasty.
+ */
+function sendRedirect(client, location, extraHeaders) {
   const body = '<html><body>Redirecting...</body></html>';
-  const headers = `HTTP/1.1 302 Found\r\n` +
+  const headers = `HTTP/1.1 303 See Other\r\n` +
                   `Location: ${location}\r\n` +
-                  `Content-Type: text/html\r\n` +
+                  `Content-Type: text/html; charset=utf-8\r\n` +
                   `Content-Length: ${Buffer.byteLength(body)}\r\n` +
                   `Connection: close\r\n` +
+                  `Cache-Control: no-cache, no-store, must-revalidate\r\n` +
+                  `Referrer-Policy: no-referrer\r\n` +
+                  safeHeaderLines(extraHeaders) +
                   `\r\n`;
   try {
     client.write(headers + body);
@@ -208,6 +252,8 @@ module.exports = {
   CRLFCRLF,
   indexOfHeaderEnd,
   parseRequestHead,
+  parseCookies,
+  safeHeaderLines,
   getAcceptKey,
   sendHttpResponse,
   sendRedirect,

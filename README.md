@@ -78,10 +78,25 @@ The configuration is done through environment variables.
 
 | Variable | Default | Description |
 |---|---|---|
-| `UUID` | `7bd180e8-...` | VLESS authentication UUID |
-| `WSPATH` | First 8 chars of UUID (can be changed through variables) | WebSocket path prefix |
+| `UUID` | `7bd180e8-...` | Your own VLESS UUID. Authenticates as the reserved user `owner`. |
+| `WSPATH` | `/` | WebSocket path prefix |
 | `PORT` / `SERVER_PORT` | `3000` | Listening port |
-| `ADMIN_TOKEN` | *(unset)* | Gate for `/admin-stats`. Unset → the page is hidden (serves the decoy). Set → requires `?token=<ADMIN_TOKEN>`. |
+| `ADMIN_TOKEN` | *(unset)* | Gate for `/admin-stats`. Unset → the page is hidden (serves the decoy). Set → `?token=<ADMIN_TOKEN>` once, then a session cookie. |
+
+Provisioning (see [Provisioning other people's devices](#provisioning-other-peoples-devices)) adds:
+
+| Variable | Default | Description |
+|---|---|---|
+| `PROVISION_SECRET` | *(unset)* | Master secret each user's UUID is derived from. Unset → provisioning is off entirely and every provisioning route serves the decoy. |
+| `PROVISION_SECRET_PREVIOUS` | *(unset)* | Also accepted during a secret rotation, so existing devices keep working. |
+| `USERS` | *(empty)* | Comma/space separated labels, e.g. `alice,bob`. `[a-z0-9_-]`, max 32 chars, max 64 users. `owner` is reserved. |
+| `PUBLIC_HOST` | *(Host header)* | Hostname written into generated configs. Effectively mandatory — see the warning on the provisioning page. |
+| `PUBLIC_PORT` | `443` | Port written into generated configs. |
+| `INVITE_TTL_SECONDS` | `900` | How long a minted invite stays valid. |
+| `INVITE_PATH` | `/i/` | Prefix for invite links. Change it if it would collide with `WSPATH`. |
+| `SESSION_TTL_SECONDS` | `43200` | Admin cookie lifetime. |
+| `INTERCEPT_CA` | *(built-in)* | Override the CA embedded in generated configs. Empty string omits it. |
+| `TRUST_PROXY` | auto | `1`/`0`. Auto-detected from `FLY_APP_NAME`; controls whether `X-Forwarded-Proto` and `Fly-Client-IP` are believed. |
 
 **Example:**
 
@@ -152,10 +167,45 @@ A live stats page is available at:
 http://your-server:port/admin-stats?token=<ADMIN_TOKEN>
 ```
 
-It shows active connections, stream counts, protocol breakdown (TCP/UDP/Mux), total traffic, and connection history. Auto-refreshes every 5 seconds.
+It shows active connections, stream counts, protocol breakdown (TCP/UDP/Mux), total traffic, per-user totals, and connection history. It updates live over Server-Sent Events, about once a second — no page reload, so scroll position survives.
+
+The token is needed only once: it is exchanged for an `HttpOnly; Secure; SameSite=Strict` session cookie and the browser is redirected to a clean URL, so the credential stops appearing in history, bookmarks and `Referer`. `?logout=1` clears the session.
 
 > [!WARNING]
 > **This page prints your `WSPATH` and traffic stats.** With `ADMIN_TOKEN` unset it is hidden behind the decoy page; set `ADMIN_TOKEN` (and, on a VPS, also scope your reverse proxy to `/<WSPATH>`) before relying on it.
+
+---
+
+## Provisioning other people's devices
+
+`/admin-stats/provision` mints a short-lived invite link for one configured user. They open it on their phone, scan or tap, and connect. **Fly/VPS only** — the Workers build has no admin page and stays single-user.
+
+Each person gets their **own UUID**, derived rather than stored:
+
+```
+uuid(label) = HMAC-SHA256(PROVISION_SECRET, "vless-uuid-v1\n" + label)[0..16]
+```
+
+Nothing is written to disk, which matters because Fly machines have no volume — a users file would work in testing and vanish on the next deploy. The whole registry is reproducible from two secrets.
+
+```bash
+fly secrets set PROVISION_SECRET="$(openssl rand -base64 32)" USERS=alice,bob
+fly secrets set PUBLIC_HOST=edge.example.com
+```
+
+Then open `/admin-stats/provision`, pick a user, and send them the link. It expires in 15 minutes.
+
+**What the invitee gets.** The landing page carries no credential — chat apps fetch pasted URLs to build previews, and burning the invite there would kill it before the human taps. Tapping through reveals a `vless://` link (one tap into v2rayNG, Streisand, Hiddify or NekoBox), a QR of it, and a **full JSON config download**. The download exists because a share link structurally cannot carry a certificate: on a [TLS-intercepting network](#networks-that-intercept-tls) only the JSON works.
+
+**Revoking.** Drop the label from `USERS` and redeploy. Their credential stops authenticating immediately, including any live tunnel, and nobody else is affected.
+
+> [!IMPORTANT]
+> **Rotating `PROVISION_SECRET` invalidates every derived UUID at once**, and the failure looks like the server being down rather than a stale credential — a mismatched UUID gets the decoy page and a hangup. Rotate in two deploys: first set `PROVISION_SECRET_PREVIOUS` to the old value alongside the new `PROVISION_SECRET`, reissue everyone, then remove it.
+
+> [!WARNING]
+> **Provisioning happens over the network you are trying to circumvent.** The invitee downloads their credential through the same middlebox the config exists to work around, so an intercepting network sees it in plaintext at that moment. This inverts the usual intuition that the pinned CA is protective — it makes the tunnel work, it does not hide the handover. Provision over mobile data where it matters.
+
+Two more things worth knowing. `fly secrets set` restarts the machine, so adding or removing a user briefly drops every tunnel and resets the stats counters — batch your changes. And invites are **not** reliably single-use: redemption is remembered in memory only, so a restart makes an unexpired link usable again. The 15-minute expiry is the real boundary.
 
 ---
 
@@ -202,6 +252,7 @@ Secrets survive redeployment, whereas plain-text vars are overwritten from `wran
 | DNS over UDP (port 53) | ✅ native | ✅ via DNS-over-HTTPS |
 | UDP to any other port | ✅ | ❌ no UDP on Workers |
 | Mux.Cool (TCP substreams) | ✅ | ✅ |
+| Multi-user / device provisioning | ✅ | ❌ single-user only |
 | xUDP / Mux UDP substreams | ✅ | ⚠️ port 53 only |
 | TLS | self-signed or reverse proxy | ✅ terminated at the edge |
 | Admin dashboard | ✅ `/admin-stats` | ❌ use the Cloudflare dashboard |
@@ -425,6 +476,12 @@ src/node/             # Node.js server build
   dnscache.js         #   DNS cache + in-flight request coalescing
   stats.js            #   connection and traffic counters
   pages.js            #   admin dashboard rendering
+  users.js            #   HMAC-derived per-user credentials, registry lookup
+  tokens.js           #   signed invites and admin sessions, burn store
+  clientconf.js       #   vless:// links and Xray config generation
+  interceptca.js      #   baked interception CA for generated configs
+  provision-pages.js  #   invite minting and redemption pages
+  ratelimit.js        #   token-bucket limiter for admin/invite routes
   config.js           #   env reading (the only module that touches process.env)
   tlscert.js          #   bundled self-signed keypair, TLS detection
   log.js              #   timestamped logger
@@ -450,8 +507,14 @@ npm test
 
 Uses Node's built-in test runner, so there is nothing to install. The suite
 covers the WebSocket codec, HTTP head parsing, config, stats, the DNS cache,
-the admin-token gate, and end-to-end tunnels over all three VLESS commands
-(TCP, legacy UDP, and Mux.Cool) against real echo servers.
+the admin-token gate, credential derivation, invite signing, the provisioning
+gate truth table, and end-to-end tunnels over all three VLESS commands (TCP,
+legacy UDP, and Mux.Cool) against real echo servers.
+
+`test/image.test.js` walks the require graph from `appws.js` and fails if
+anything the server loads falls outside the Dockerfile's COPY list or pulls in
+an npm dependency — the class of mistake that works locally and crashes the
+container on boot.
 
 `src/node/server.js` is importable without side effects — `createServer()`
 builds a server without binding a port, printing a banner, or starting a timer

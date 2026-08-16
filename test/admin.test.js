@@ -44,9 +44,27 @@ function start(env) {
 
 const req = (path) => `GET ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`;
 
-async function bodyOf(port, path, method = 'GET') {
-  const raw = await rawRequest(port, `${method} ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`);
+/** Build a request, optionally carrying a Cookie header. */
+function request(path, method = 'GET', cookie = '') {
+  return `${method} ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\n` +
+         (cookie ? `Cookie: ${cookie}\r\n` : '') + '\r\n';
+}
+
+async function bodyOf(port, path, method = 'GET', cookie = '') {
+  const raw = await rawRequest(port, request(path, method, cookie));
   return splitResponse(raw).body;
+}
+
+async function headOf(port, path, cookie = '') {
+  const raw = await rawRequest(port, request(path, 'GET', cookie));
+  return splitResponse(raw);
+}
+
+/** Pull the cookie name=value pair out of a Set-Cookie response head. */
+function cookieOf(head) {
+  const m = head.match(/Set-Cookie: ([^;]+);/);
+  assert.ok(m, 'response must carry a Set-Cookie');
+  return m[1];
 }
 
 test('with ADMIN_TOKEN unset the endpoint is hidden entirely', async (t) => {
@@ -75,10 +93,65 @@ test('with ADMIN_TOKEN set the dashboard needs the exact token', async (t) => {
     assert.equal(sha256(await bodyOf(srv.port, path)), DECOY, `${path} must be gated`);
   }
 
-  const ok = await bodyOf(srv.port, '/admin-stats?token=s3cret');
+  // The correct token no longer renders the page directly: it is traded for a
+  // session cookie and redirected to a clean URL, so the credential stops
+  // appearing in history, bookmarks and the Referer sent to the CDN.
+  const { head } = await headOf(srv.port, '/admin-stats?token=s3cret');
+  assert.match(head, /^HTTP\/1\.1 303 See Other/);
+  assert.match(head, /Location: \/admin-stats\r\n/);
+  assert.match(head, /Set-Cookie: adm=[^;]+; Max-Age=\d+; Path=\/; HttpOnly; SameSite=Strict/);
+  assert.ok(!head.includes('s3cret'), 'the token must not be echoed back');
+
+  const ok = await bodyOf(srv.port, '/admin-stats', 'GET', cookieOf(head));
   assert.notEqual(sha256(ok), DECOY);
   assert.match(ok.toString(), /Server Statistics Dashboard/);
   assert.match(ok.toString(), /\/tunnel/, 'the unlocked page does show the ws path');
+});
+
+test('the session cookie alone authorises, and a tampered one does not', async (t) => {
+  const srv = await start({ ADMIN_TOKEN: 's3cret' });
+  t.after(() => srv.close());
+
+  const { head } = await headOf(srv.port, '/admin-stats?token=s3cret');
+  const cookie = cookieOf(head);
+
+  assert.match((await bodyOf(srv.port, '/admin-stats', 'GET', cookie)).toString(),
+    /Server Statistics Dashboard/);
+
+  const tampered = cookie.slice(0, -1) + (cookie.endsWith('A') ? 'B' : 'A');
+  assert.equal(sha256(await bodyOf(srv.port, '/admin-stats', 'GET', tampered)), DECOY);
+  assert.equal(sha256(await bodyOf(srv.port, '/admin-stats', 'GET', 'adm=garbage')), DECOY);
+
+  // The __Host- name is only legal on a secure origin; over plaintext it must
+  // not be honoured, or a downgrade attacker could plant one.
+  const hostNamed = cookie.replace(/^adm=/, '__Host-adm=');
+  assert.equal(sha256(await bodyOf(srv.port, '/admin-stats', 'GET', hostNamed)), DECOY);
+});
+
+test('the cookie authorises the stats stream without a redirect', async (t) => {
+  const srv = await start({ ADMIN_TOKEN: 's3cret' });
+  t.after(() => srv.close());
+
+  const { head } = await headOf(srv.port, '/admin-stats?token=s3cret');
+
+  // EventSource cannot follow a redirect to a non-stream response, so the
+  // stream endpoint must authorise the cookie directly.
+  const { head: streamHead } = await readSseEvents(
+    srv.port, '/admin-stats/stream', 1, 6000, cookieOf(head)
+  );
+  assert.match(streamHead, /^HTTP\/1\.1 200 OK/);
+  assert.match(streamHead, /Content-Type: text\/event-stream/);
+});
+
+test('logout clears the session', async (t) => {
+  const srv = await start({ ADMIN_TOKEN: 's3cret' });
+  t.after(() => srv.close());
+
+  const { head } = await headOf(srv.port, '/admin-stats?token=s3cret');
+  const { head: out } = await headOf(srv.port, '/admin-stats?logout=1', cookieOf(head));
+
+  assert.match(out, /^HTTP\/1\.1 303 See Other/);
+  assert.match(out, /Set-Cookie: adm=; Max-Age=0/);
 });
 
 test('the gate is GET-only and exact-path', async (t) => {
@@ -90,12 +163,18 @@ test('the gate is GET-only and exact-path', async (t) => {
   assert.equal(sha256(await bodyOf(srv.port, '/Admin-Stats?token=s3cret')), DECOY);
 });
 
-test('extra query parameters around the token are fine', async (t) => {
+test('extra query parameters survive the redirect but the token is dropped', async (t) => {
   const srv = await start({ ADMIN_TOKEN: 's3cret' });
   t.after(() => srv.close());
 
-  const body = await bodyOf(srv.port, '/admin-stats?a=1&token=s3cret&b=2');
-  assert.match(body.toString(), /Server Statistics Dashboard/);
+  const { head } = await headOf(srv.port, '/admin-stats?a=1&token=s3cret&b=2');
+  const location = head.match(/Location: (.*)\r\n/)[1];
+
+  assert.ok(!location.includes('token'), 'the credential must not survive into history');
+  assert.ok(location.includes('a=1') && location.includes('b=2'));
+
+  assert.match((await bodyOf(srv.port, location, 'GET', cookieOf(head))).toString(),
+    /Server Statistics Dashboard/);
 });
 
 test('tokensMatch is length-safe and rejects non-strings', () => {
@@ -105,7 +184,9 @@ test('tokensMatch is length-safe and rejects non-strings', () => {
   assert.equal(tokensMatch('abcd', 'abc'), false);
   assert.equal(tokensMatch(null, 'abc'), false);
   assert.equal(tokensMatch(undefined, 'abc'), false);
-  assert.equal(tokensMatch('', ''), true);
+  // An unset ADMIN_TOKEN must never match, even against an empty candidate —
+  // otherwise a server with no token configured would authorise `?token=`.
+  assert.equal(tokensMatch('', ''), false);
 });
 
 test('a request head that never terminates is dropped rather than buffered forever', async (t) => {
@@ -256,16 +337,19 @@ test('a multibyte payload survives chunk framing', async (t) => {
   assert.equal(events[1].active[0].lastHost, `${host}:443`);
 });
 
-test('the dashboard points at the stream and carries the token across', async (t) => {
+test('the dashboard derives the stream URL and leaks no credential', async (t) => {
   const srv = await start({ ADMIN_TOKEN: 's3cret' });
   t.after(() => srv.close());
 
-  const html = (await bodyOf(srv.port, '/admin-stats?token=s3cret')).toString();
+  const { head } = await headOf(srv.port, '/admin-stats?token=s3cret');
+  const cookie = cookieOf(head);
+  const html = (await bodyOf(srv.port, '/admin-stats', 'GET', cookie)).toString();
 
   // The token must never be interpolated into the script — the client derives
   // the stream URL from location, so there is no second place to get it wrong.
   assert.match(html, /location\.pathname \+ '\/stream' \+ location\.search/);
   assert.ok(!html.includes('s3cret'), 'the token must not be baked into the page');
+  assert.ok(!html.includes(cookie.split('=')[1]), 'nor may the session value');
 });
 
 // ==========================================
