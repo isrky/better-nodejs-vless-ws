@@ -320,3 +320,29 @@ test('a Mux substream to an allowed domain still opens', { timeout: 15000 }, asy
   const dataLen = (frame[2 + metaLen] << 8) | frame[3 + metaLen];
   assert.equal(frame.subarray(4 + metaLen, 4 + metaLen + dataLen).toString(), 'NAMED');
 });
+
+test('a validated tunnel IS counted', { timeout: 15000 }, async (t) => {
+  // The other half of the stats carve-out: HTTP hits must not count (see
+  // admin.test.js), but a real tunnel must.
+  const echo = await startTcpEcho();
+  const proxy = await startProxy();
+  t.after(async () => { await proxy.close(); await echo.close(); });
+
+  const ws = await connectWs(proxy.port);
+  t.after(() => ws.close());
+
+  assert.equal(proxy.handle.stats.snapshot().totalConnections, 0, 'nothing yet');
+
+  ws.send(Buffer.concat([
+    vlessHeader(config.uuidBytes, 1, '127.0.0.1', echo.port),
+    Buffer.from('counted')
+  ]));
+  assert.deepEqual(await ws.next(), Buffer.from([0x00, 0x00]));
+  assert.equal((await ws.next()).toString(), 'COUNTED');
+
+  const snap = proxy.handle.stats.snapshot();
+  assert.equal(snap.totalConnections, 1);
+  assert.equal(snap.activeConnections, 1);
+  assert.equal(snap.active[0].lastHost, `127.0.0.1:${echo.port}`);
+  assert.ok(snap.totalBytesTx > 0, 'and its bytes are attributed');
+});

@@ -127,6 +127,83 @@ function writeUpgradeResponse(client, key) {
   );
 }
 
+// ==========================================
+// Server-Sent Events
+//
+// The only response shape here that leaves the socket open. Everything above
+// writes a Content-Length body and the caller then tears the connection down;
+// these functions open a stream the caller keeps writing to.
+// ==========================================
+
+function safeWrite(client, text) {
+  try {
+    return client.write(text);
+  } catch (e) {
+    return false;   // client already gone
+  }
+}
+
+/**
+ * Write one HTTP/1.1 chunk.
+ *
+ * byteLength, not .length: the chunk size prefix counts BYTES. JSON.stringify
+ * does not escape non-ASCII, so a single IDN hostname in a snapshot puts raw
+ * multibyte UTF-8 in the payload — and a size counting JS characters
+ * desynchronises the chunk stream permanently. The browser then stops applying
+ * updates with no error raised anywhere. Same trap as Content-Length above.
+ */
+function writeChunk(client, text) {
+  const bytes = Buffer.byteLength(text);
+  if (bytes === 0) return true;
+  return safeWrite(client, `${bytes.toString(16)}\r\n${text}\r\n`);
+}
+
+/**
+ * Open a chunked text/event-stream response. Leaves the socket OPEN.
+ *
+ * Chunked rather than close-delimited on purpose: a body with neither
+ * Content-Length nor Transfer-Encoding is legal and EventSource accepts it, but
+ * it is close-delimited — and a proxy that cannot see a body boundary is
+ * exactly the proxy that buffers until close, silently turning the stream into
+ * "nothing ever arrives". Chunked gives every intermediary a per-event flush
+ * boundary. X-Accel-Buffering additionally opts out of nginx's proxy_buffering,
+ * which is on by default and withholds a proxied response regardless of framing.
+ */
+function sendEventStreamHead(client) {
+  return safeWrite(client,
+    `HTTP/1.1 200 OK\r\n` +
+    `Content-Type: text/event-stream; charset=utf-8\r\n` +
+    `Cache-Control: no-cache, no-store, must-revalidate\r\n` +
+    `Connection: keep-alive\r\n` +
+    `Transfer-Encoding: chunked\r\n` +
+    `X-Accel-Buffering: no\r\n` +
+    `\r\n`);
+}
+
+/** Tell the browser how long to wait before reconnecting a dropped stream. */
+function sendSseRetry(client, ms) {
+  return writeChunk(client, `retry: ${ms}\n\n`);
+}
+
+/** A comment line. Ignored by EventSource; useful as a keepalive. */
+function sendSseComment(client, text) {
+  return writeChunk(client, `: ${text}\n\n`);
+}
+
+/**
+ * Send one event. Multi-line data needs one `data:` line per line, so split
+ * defensively even though JSON.stringify escapes control characters.
+ */
+function sendSseEvent(client, data) {
+  const body = String(data).split('\n').map((line) => `data: ${line}\n`).join('');
+  return writeChunk(client, `${body}\n`);
+}
+
+/** The terminating zero-length chunk. */
+function endEventStream(client) {
+  return safeWrite(client, '0\r\n\r\n');
+}
+
 module.exports = {
   CRLFCRLF,
   indexOfHeaderEnd,
@@ -134,5 +211,10 @@ module.exports = {
   getAcceptKey,
   sendHttpResponse,
   sendRedirect,
-  writeUpgradeResponse
+  writeUpgradeResponse,
+  sendEventStreamHead,
+  sendSseRetry,
+  sendSseComment,
+  sendSseEvent,
+  endEventStream
 };

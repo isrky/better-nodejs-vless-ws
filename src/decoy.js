@@ -8,102 +8,71 @@
 // cannot drift into presenting different cover sites. CommonJS on purpose —
 // wrangler's bundler pulls it into the ESM worker via a default import, the
 // same bridge src/vless.js uses.
+//
+// Styled with classless Pico from jsDelivr: the markup below carries no
+// framework class names, so it reads like hand-written HTML. The tradeoff is
+// deliberate and accepted — this page makes one outbound request, and on a
+// network that blocks the CDN it renders unstyled.
+//
+// Two constraints on edits, both of which fail confusingly:
+//   * this is a template literal, so the markup must contain no backtick and
+//     no ${ ;
+//   * nothing here may require() or touch a Node built-in, or the Worker build
+//     stops bundling without a nodejs_compat flag.
 
 const FAKE_INDEX_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Welcome</title>
+    <title>Northwind Systems</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.classless.min.css">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: #f5f7fa;
-            color: #2c3e50;
-            line-height: 1.6;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 40px 20px;
-        }
-        header {
-            text-align: center;
-            padding: 60px 0;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            margin-bottom: 40px;
-            border-radius: 12px;
-        }
-        header h1 { font-size: 2.5em; margin-bottom: 10px; }
-        header p { font-size: 1.2em; opacity: 0.9; }
-        .features {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 30px;
-            margin-bottom: 40px;
-        }
-        .feature-card {
-            background: white;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.08);
-            transition: transform 0.2s;
-        }
-        .feature-card:hover { transform: translateY(-5px); }
-        .feature-card h3 { color: #667eea; margin-bottom: 10px; }
-        .cta {
-            text-align: center;
-            padding: 40px;
-            background: white;
-            border-radius: 12px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.08);
-        }
-        .btn {
-            display: inline-block;
-            padding: 12px 30px;
-            background: #667eea;
-            color: white;
-            text-decoration: none;
-            border-radius: 6px;
-            margin: 10px;
-            transition: background 0.2s;
-        }
-        .btn:hover { background: #5a67d8; }
-        footer { text-align: center; padding: 40px 0; color: #7f8c8d; }
+        .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 1rem; }
+        .features article { margin: 0; }
+        .cta { text-align: center; }
     </style>
 </head>
 <body>
-    <div class="container">
+    <nav>
+        <ul>
+            <li><strong>Northwind Systems</strong></li>
+        </ul>
+        <ul>
+            <li><a href="#">Products</a></li>
+            <li><a href="#">Pricing</a></li>
+            <li><a href="#">Support</a></li>
+        </ul>
+    </nav>
+    <main>
         <header>
-            <h1>Welcome to Our Service</h1>
-            <p>Reliable, fast, and secure solutions for your needs</p>
+            <h1>Infrastructure that stays out of your way</h1>
+            <p>Reliable, fast and secure managed services for teams that would rather ship than maintain.</p>
         </header>
-        <div class="features">
-            <div class="feature-card">
-                <h3>High Performance</h3>
-                <p>Built with cutting-edge technology to ensure the best experience with minimal latency and maximum throughput.</p>
-            </div>
-            <div class="feature-card">
-                <h3>Secure & Private</h3>
-                <p>Your data security is our top priority. We use industry-standard encryption to protect all communications.</p>
-            </div>
-            <div class="feature-card">
-                <h3>Global Network</h3>
-                <p>Access our services from anywhere in the world with our distributed network infrastructure.</p>
-            </div>
-        </div>
-        <div class="cta">
-            <h2>Get Started Today</h2>
-            <p>Join thousands of satisfied users who trust our platform.</p>
-            <a href="#" class="btn">Learn More</a>
-            <a href="#" class="btn">Contact Us</a>
-        </div>
-        <footer>
-            <p> Contact 2026 Our Service. All rights reserved.</p>
-        </footer>
-    </div>
+        <section class="features">
+            <article>
+                <h3>High performance</h3>
+                <p>Built on modern infrastructure for minimal latency and consistent throughput, wherever your users are.</p>
+            </article>
+            <article>
+                <h3>Secure by default</h3>
+                <p>Encryption in transit and at rest on every plan, with no configuration required and no surprises later.</p>
+            </article>
+            <article>
+                <h3>Global network</h3>
+                <p>Distributed points of presence keep response times low without you having to think about regions.</p>
+            </article>
+        </section>
+        <section class="cta">
+            <h2>Get started today</h2>
+            <p>Join thousands of teams already running on Northwind.</p>
+            <a href="#" role="button">Learn more</a>
+            <a href="#" role="button" class="secondary">Contact sales</a>
+        </section>
+    </main>
+    <footer>
+        <small>&copy; 2026 Northwind Systems. All rights reserved.</small>
+    </footer>
 </body>
 </html>`;
 

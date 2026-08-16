@@ -12,6 +12,11 @@
 //
 //   session.config   session.log   session.stats   session.connInfo   session.dns
 //   session.dead                     -- getter; NEVER destructure it (see below)
+//
+// `connInfo` is null until the VLESS header validates -- decoy hits, the health
+// check on GET /, the dashboard and the stats stream never allocate one. Relays
+// are only ever constructed after that point, so a relay never observes null.
+//
 //   session.sendWs(opcode, payload)  -- false on backpressure
 //   session.sendMux(meta, hasData, payload)
 //   session.pauseSource(stream)      -- registers stream for resume on client drain
@@ -29,7 +34,8 @@ const {
 
 const { OPCODE, decodeFrame, encodeFrame, encodeMuxFrame } = require('./wsframe.js');
 const {
-  indexOfHeaderEnd, parseRequestHead, sendHttpResponse, writeUpgradeResponse
+  indexOfHeaderEnd, parseRequestHead, sendHttpResponse, writeUpgradeResponse,
+  sendEventStreamHead, sendSseRetry, sendSseComment, sendSseEvent
 } = require('./http.js');
 const { FAKE_INDEX_HTML, renderStatsPage } = require('./pages.js');
 const { createTcpRelay } = require('./relay.js');
@@ -40,6 +46,24 @@ const HTML = 'text/html; charset=utf-8';
 
 const STATE_HTTP = 'HTTP';
 const STATE_WS = 'WS';
+const STATE_SSE = 'SSE';
+
+const ADMIN_PATH = '/admin-stats';
+const ADMIN_STREAM_PATH = '/admin-stats/stream';
+
+// One snapshot per second. The uptime counter advancing is also the cheapest
+// possible "this page is live" signal, and 1 Hz is far inside every proxy idle
+// timeout worth worrying about (Fly's is ~60s). If this is ever raised past
+// ~20s, a periodic `: ping` comment becomes necessary — without one the stream
+// dies each minute and EventSource silently reconnects, which looks like a
+// flickering dashboard rather than a timeout.
+const SSE_INTERVAL_MS = 1000;
+
+// Still draining from the last tick: skip this snapshot rather than queue it.
+const SSE_SKIP_BYTES = 64 * 1024;
+
+// Genuinely stuck (a suspended tab whose socket never FINs): give up.
+const SSE_MAX_BUFFERED = 1024 * 1024;
 
 class Session {
   #client;
@@ -54,6 +78,7 @@ class Session {
 
   #relay = null;
   #vlessStarted = false;
+  #sseTimer = null;
 
   // Sources paused because the client could not keep up. The single 'drain'
   // handler resumes everything here, so no relay needs to see that event.
@@ -65,7 +90,8 @@ class Session {
     this.stats = deps.stats;
     this.dns = deps.dns;
     this.log = deps.log;
-    this.connInfo = deps.stats.openConnection();
+    // Allocated only once a VLESS header validates — see #onMessage().
+    this.connInfo = null;
   }
 
   get dead() {
@@ -119,6 +145,11 @@ class Session {
     if (this.#dead) return;
     this.#dead = true;
 
+    if (this.#sseTimer) {
+      clearInterval(this.#sseTimer);
+      this.#sseTimer = null;
+    }
+
     const client = this.#client;
     client.removeAllListeners('data');
     client.removeAllListeners('drain');
@@ -143,13 +174,26 @@ class Session {
 
   #onData(chunk) {
     if (this.#dead) return;
+
+    // A stats stream is write-only from here on. Returning before the push also
+    // means a client that pipelines garbage down it cannot grow the queue.
+    if (this.#state === STATE_SSE) return;
+
     this.#inbound.push(chunk);
 
-    if (this.#state === STATE_HTTP && !this.#handleHttp()) return;
+    if (this.#state === STATE_HTTP) this.#handleHttp();
+    if (this.#dead) return;
     if (this.#state === STATE_WS) this.#handleWs();
   }
 
-  /** Returns true once the connection has been upgraded to WebSocket. */
+  /**
+   * Consume the request head and dispatch.
+   *
+   * Deliberately returns nothing: `#state` is the source of truth, and a
+   * boolean cannot express the three real outcomes (upgraded, handled and
+   * closed, handled and still streaming). Every terminal path below either
+   * sets `#dead` or moves `#state`.
+   */
   #handleHttp() {
     const head = this.#inbound.flatten();
     const eoh = indexOfHeaderEnd(head);
@@ -160,7 +204,7 @@ class Session {
       if (this.#inbound.size > this.config.maxHeaderBytes) {
         this.destroy('Request head too large');
       }
-      return false;
+      return;
     }
 
     const req = parseRequestHead(head.subarray(0, eoh + 4));
@@ -168,34 +212,28 @@ class Session {
 
     if (!req) {
       this.destroy('Invalid HTTP');
-      return false;
+      return;
     }
 
-    if (req.method === 'GET' && req.basePath === '/admin-stats') {
-      this.#serveAdminStats(req);
-      return false;
-    }
+    if (req.basePath === ADMIN_PATH) return this.#serveAdminStats(req);
+    if (req.basePath === ADMIN_STREAM_PATH) return this.#serveAdminStream(req);
 
     const upgrade = req.headers.upgrade;
     if (req.method !== 'GET' || !upgrade || upgrade.toLowerCase() !== 'websocket') {
-      this.#serveDecoy(200, 'Not WS Request - served fake page');
-      return false;
+      return this.#serveDecoy(200, 'Not WS Request - served fake page');
     }
 
     if (!req.path.includes(this.config.wsPath)) {
-      this.#serveDecoy(200, 'Bad WS Path - served fake page');
-      return false;
+      return this.#serveDecoy(200, 'Bad WS Path - served fake page');
     }
 
     const key = req.headers['sec-websocket-key'];
     if (!key) {
-      this.#serveDecoy(400, 'No WS Key - served fake page');
-      return false;
+      return this.#serveDecoy(400, 'No WS Key - served fake page');
     }
 
     writeUpgradeResponse(this.#client, key);
     this.#state = STATE_WS;
-    return true;
   }
 
   #serveDecoy(status, reason) {
@@ -203,19 +241,78 @@ class Session {
     this.destroy(reason);
   }
 
-  #serveAdminStats(req) {
+  /**
+   * The gate for both admin routes. Shared so the two cannot drift apart —
+   * a stream that authorised more loosely than the page would be a silent hole.
+   */
+  #adminAuthorised(req) {
+    if (req.method !== 'GET') return false;
+    if (!this.config.adminToken) return false;
     const token = req.query ? new URLSearchParams(req.query).get('token') : null;
+    return tokensMatch(token, this.config.adminToken);
+  }
 
-    if (this.config.adminToken && tokensMatch(token, this.config.adminToken)) {
-      sendHttpResponse(this.#client, 200, HTML,
-        renderStatsPage(this.stats.snapshot(), this.config.wsPath));
-      this.destroy('Admin stats served');
-      return;
+  #serveAdminStats(req) {
+    if (!this.#adminAuthorised(req)) {
+      // Unset token or mismatch: hide the endpoint behind the decoy page so its
+      // existence — and the wsPath it prints — is not disclosed.
+      return this.#serveDecoy(200, 'Admin stats gated - served fake page');
     }
 
-    // Unset token or mismatch: hide the endpoint behind the decoy page so its
-    // existence — and the wsPath it prints — is not disclosed.
-    this.#serveDecoy(200, 'Admin stats gated - served fake page');
+    sendHttpResponse(this.#client, 200, HTML,
+      renderStatsPage(this.stats.snapshot(), this.config.wsPath));
+    this.destroy('Admin stats served');
+  }
+
+  /**
+   * The live stats stream behind the dashboard.
+   *
+   * Unauthorised requests get byte-identical bytes to an unauthorised
+   * /admin-stats, which are byte-identical to GET / — probing this path
+   * discloses nothing that probing the root does not.
+   */
+  #serveAdminStream(req) {
+    if (!this.#adminAuthorised(req)) {
+      return this.#serveDecoy(200, 'Admin stream gated - served fake page');
+    }
+
+    if (!sendEventStreamHead(this.#client)) {
+      return this.destroy('SSE head write failed');
+    }
+
+    this.#state = STATE_SSE;
+    // A suspended laptop leaves a half-open socket that never signals close;
+    // TCP keepalive is the only thing that detects it.
+    this.#client.setKeepAlive(true, 30000);
+
+    sendSseRetry(this.#client, 3000);
+    sendSseComment(this.#client, 'ok');
+
+    this.#pushStats();   // first paint, rather than a blank second
+    this.#sseTimer = setInterval(() => this.#pushStats(), SSE_INTERVAL_MS);
+    // Never let this timer be the reason the process stays alive; the open
+    // socket already refs the loop, and a stray interval would hang `--test`.
+    this.#sseTimer.unref();
+  }
+
+  /**
+   * Push one snapshot.
+   *
+   * Every event is a whole snapshot, never a delta — which is what makes
+   * dropping a tick free: the next one is authoritative, so a slow client costs
+   * resolution rather than correctness. It is also why no `id:` is emitted and
+   * no replay buffer exists.
+   */
+  #pushStats() {
+    if (this.#dead) return;
+    const client = this.#client;
+
+    if (client.writableLength > SSE_MAX_BUFFERED) {
+      return this.destroy('SSE client stalled');
+    }
+    if (client.writableLength > SSE_SKIP_BYTES) return;
+
+    sendSseEvent(client, JSON.stringify(this.stats.snapshot()));
   }
 
   // ----- WebSocket framing -----
@@ -285,6 +382,14 @@ class Session {
     }
 
     this.#vlessStarted = true;
+
+    // Only a validated tunnel is counted. Decoy hits, the platform health check
+    // on GET /, dashboard loads and the stats stream must not inflate
+    // totalConnections or push rows into the history table — the dashboard used
+    // to pollute its own data at ~12 rows a minute. Must happen before any
+    // relay is constructed: relays read session.connInfo synchronously.
+    this.connInfo = this.stats.openConnection();
+
     const initial = buf.slice(result.headerEnd);
     this.#message.clear();
 

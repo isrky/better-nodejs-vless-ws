@@ -13,12 +13,16 @@ const {
   startTestServer, rawRequest, rawTlsRequest, splitResponse, get
 } = require('./helpers/rawclient.js');
 
+const { FAKE_INDEX_HTML } = require('../src/decoy.js');
+
 const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
 
-// Recorded from the pre-refactor appws.js. Any change to the decoy page must
-// be deliberate; this is the cover site both builds present.
-const DECOY_SHA256 =
-  '9bd982572716eacade674190081051b879c992a01aacf7330200c83882bda93c';
+// Computed, not pinned. These assertions exist to prove the bytes on the wire
+// are the decoy constant unmodified and untruncated — not to freeze the page's
+// content, which a pinned hash would turn into a change-detector needing a hand
+// edit on every copy tweak. Drift between the two builds is covered separately
+// by the cross-build test in pages.test.js.
+const DECOY_SHA256 = sha256(FAKE_INDEX_HTML);
 
 test('server smoke', async (t) => {
   const srv = await startTestServer();
