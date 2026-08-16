@@ -2,6 +2,10 @@ node_modules/
 .wrangler/
 .dev.vars
 
-# Working copies with real credentials. The tracked files at the repo
-# root are placeholder templates — copy one here and fill it in.
+# Credentials and the configs rendered from them. Templates live in
+# templates/ and hold placeholders only; `npm run configs` renders into here.
 local/
+
+# The interception CA is public, but it is DER and nothing reads it at
+# runtime — src/node/interceptca.js carries the PEM the builds actually use.
+*.cer

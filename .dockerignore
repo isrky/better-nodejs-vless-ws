@@ -9,6 +9,7 @@ node_modules/
 restrictions/
 tools/
 test/
+templates/
 *.md
 *.cer
 package-lock.json

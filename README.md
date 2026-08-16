@@ -104,6 +104,11 @@ Provisioning (see [Provisioning other people's devices](#provisioning-other-peop
 UUID=your-uuid-here WSPATH=mypath PORT=8080 node appws.js
 ```
 
+The table above is **server** environment. The *client* side keeps its values in
+`local/credentials.json`, managed with `npm run creds` and rendered into the
+configs under `local/` by `npm run configs`. See [CREDENTIALS.md](CREDENTIALS.md)
+for generating each value and for the rotation order.
+
 ---
 
 ## Client Configuration
@@ -322,17 +327,29 @@ Same as above, with these differences:
 
 ### Linux Transparent Proxy (TPROXY)
 
-[`conf.json`](conf.json) is a complete Xray-core client config for a system-wide transparent proxy, and [`conf-android.json`](conf-android.json) is its counterpart for a phone — a local SOCKS inbound instead of TPROXY, plus the extras a filtered mobile network needs.
+[`templates/linux-tproxy.json`](templates/linux-tproxy.json) is a complete Xray-core client config for a system-wide transparent proxy, and [`templates/android-socks.json`](templates/android-socks.json) is its counterpart for a phone — a local SOCKS inbound instead of TPROXY, plus the extras a filtered mobile network needs.
 
-Both are templates. Every secret in them is a `<...>` placeholder, and the three host fields deliberately share one token, because `serverName`, `wsSettings.host` and the outbound address must all be identical. Copy the one you need into `local/`, which is gitignored, and fill in your own values there:
+Both are templates: every secret in them is a `${...}` placeholder, and the three host fields deliberately share one token, because `serverName`, `wsSettings.host` and the outbound address must all be identical. You do not copy or edit them. Set your values once, then render:
 
 ```bash
-cp conf-android.json local/
-$EDITOR local/conf-android.json
+npm run creds               # UUID, WSPATH, FLY_HOST, WORKER_HOST — press g to generate
+npm run configs             # writes the four local/*.json
 xray run -c local/conf-android.json
 ```
 
-Keeping the working copy in `local/` rather than editing the template in place is what stops a real UUID and WSPATH reaching a commit.
+Two templates produce **four** configs, because the outputs vary along two independent axes — platform (TPROXY vs SOCKS) and UDP policy:
+
+| | UDP blackholed | UDP tunnelled |
+|---|---|---|
+| **Linux TPROXY** | `local/conf.json` | `local/conf-udp.json` |
+| **Android SOCKS** | `local/conf-android.json` | `local/conf-android-udp.json` |
+
+The UDP variants target the Fly build, which carries UDP; the others target the Worker, which does not. See [CREDENTIALS.md](CREDENTIALS.md) for generating and rotating the values.
+
+> [!IMPORTANT]
+> `local/*.json` are **generated**. Editing one works until the next `npm run configs` silently discards it — put durable changes in `templates/` instead, and run `npm run configs:check` (exit 2 on drift) if you are unsure whether a file is still in sync.
+
+Credentials never reach a commit because they never leave `local/credentials.json` (mode 0600, gitignored). The renderer refuses to write a config with an unreplaced placeholder, and `npm test` greps every committable file for a value from the store, so the old hand-editing failure mode is gone twice over.
 
 Two details in it are deliberate and worth understanding before changing them.
 
@@ -340,11 +357,11 @@ Two details in it are deliberate and worth understanding before changing them.
 
 **UDP other than DNS is blackholed locally.** Workers has no UDP, so a `network: udp` routing rule sends the rest to a `blackhole` outbound and applications fail immediately instead of waiting on the Worker to refuse. For the same reason `mux.xudpProxyUDP443` is `reject` rather than `allow`, which makes browsers fall back to TCP for HTTP/3 straight away.
 
-**`mux.concurrency` is `-1` in the templates**, which disables TCP multiplexing while leaving XUDP intact. That is the conservative default, chosen because it is the correct one on the Free plan — not because it is the faster one.
+**`mux.concurrency` is `8` in the templates.** That is correct for the Fly build and for Workers **Paid**. On the Workers **Free** plan set it to `-1` in `templates/*.json` and re-render — `-1` disables TCP multiplexing while leaving XUDP intact, and it is the only safe setting against a 10 ms CPU budget.
 
 Multiplexing is a real latency win but it is not free. Measured over the same workload, mux used roughly **twice the total CPU** of the plain relay (767 ms and 791 ms across two runs, against 399 ms) and — worse for the Free plan — concentrated all of it into **one** invocation rather than spreading it over 54, since a single WebSocket carries every connection. Against a 10 ms per-invocation budget that is fatal. Against 30 s on Paid it is irrelevant, and mux also *reduces* request count, because one upgrade serves up to eight connections.
 
-So: set it to `8` on Workers Paid, leave it at `-1` on Free.
+So: `8` on Fly or Workers Paid, `-1` on Workers Free.
 
 > [!NOTE]
 > Until recently `-1` was the only setting that worked correctly, because the mux path had no `PROXYIP` retry: multiplexed substreams could not reach Cloudflare-hosted origins at all, so enabling mux silently broke a large share of the web while direct-dial destinations kept working. `src/worker/mux.mjs` now performs the same per-substream retry that `src/worker/relay.mjs` does. The retry is per substream rather than per connection, since one mux session carries many destinations at once.
@@ -393,20 +410,22 @@ Some networks — corporate, school, and national filters — terminate every TL
 - **HTTP/2 stops working**, because interception forces traffic back to HTTP/1.1. WebSocket is what survives, which is why this transport is the right choice here even though Xray now prints `WebSocket transport … is deprecated, migrate to XHTTP H2 & H3` on startup. **Ignore that warning on such a network.** H2 is precisely what the middlebox breaks, and H3 is QUIC over UDP, which these networks generally block outside ports 53 and 123. Do not "migrate" and expect it to keep working.
 - **The certificate your client sees is not Cloudflare's.** You have to trust the interception CA, or the handshake fails.
 
-Add the CA to `tlsSettings.certificates` rather than installing it system-wide. [`conf-android.json`](conf-android.json) is set up this way already, with the certificate itself left as a placeholder for you to paste over:
+Add the CA to `tlsSettings.certificates` rather than installing it system-wide. Both templates carry a `${CA_PEM_LINES}` marker, and `npm run configs` splices the PEM in from `src/node/interceptca.js`, so there is nothing to paste:
 
 ```json
 "tlsSettings": {
-  "serverName": "<your-host>",
+  "serverName": "${HOST}",
   "certificates": [
-    { "usage": "verify", "certificate": ["-----BEGIN CERTIFICATE-----", "…", "-----END CERTIFICATE-----"] }
+    { "usage": "verify", "certificate": ["${CA_PEM_LINES}"] }
   ]
 }
 ```
 
+Choose the CA in `npm run creds` → `INTERCEPT_CA_FILE`, which offers three named states: **bundled** (the root from `src/node/interceptca.js`), **none** (omit the `certificates` block entirely), or **file** (your own **PEM**, not DER — convert a `.cer` with `openssl x509 -inform der -in x.cer -out ca.pem`). `npm run configs` prints which one is in effect.
+
 This **adds** to the system trust store rather than replacing it — `disableSystemRoot` defaults to `false` — so ordinary public certificates still validate. On Android this is not merely tidier but required: Go reads only `/system/etc/security/cacerts`, so a CA you install through Settings is invisible to Xray.
 
-Note that forgetting to replace the placeholder is not caught by `xray run -test`. Xray ignores PEM it cannot parse rather than rejecting the config, so the certificate is simply never added to the pool. That fails closed rather than open — verification still runs against the public roots — but it surfaces as an `x509` error when you connect, not when you validate. If a config that tests clean fails to handshake on an intercepting network, check the certificate block first.
+Note that forgetting to replace the placeholder is not caught by `xray run -test`. Xray ignores PEM it cannot parse rather than rejecting the config — which is why `npm run configs` parses it with `node:crypto`'s `X509Certificate` and refuses to write anything if it fails, so the certificate is simply never added to the pool. That fails closed rather than open — verification still runs against the public roots — but it surfaces as an `x509` error when you connect, not when you validate. If a config that tests clean fails to handshake on an intercepting network, check the certificate block first.
 
 Two caveats. On **Windows** a CA supplied this way is silently ignored unless you also set `disableSystemRoot: true`, which then drops the public roots; import it into the Windows certificate store instead. And `alpn` should be **left unset** — Xray's WebSocket dialer already pins `http/1.1`, so setting it explicitly does nothing and setting `["h2","http/1.1"]` will break the upgrade.
 
@@ -460,9 +479,16 @@ both.
 
 ```
 appws.js              # Node entry point — requires src/node/server.js and listens
-conf.json             # client template: Linux system-wide TPROXY
-conf-android.json     # client template: Android / local SOCKS
-local/                # your filled-in copies (gitignored)
+CREDENTIALS.md        # generating and rotating credential values
+templates/            # client config templates — placeholders only
+  linux-tproxy.json   #   Linux system-wide TPROXY
+  android-socks.json  #   Android / local SOCKS
+local/                # credentials.json plus the configs rendered from it (gitignored)
+tools/
+  credentials.mjs     #   interactive credential manager (npm run creds)
+  credstore.mjs       #   the store: schema, validation, atomic read/write
+  render-configs.mjs  #   renders local/*.json from templates/ + the store
+  qr.mjs              #   share link / QR pipeline
 src/vless.js          # VLESS parser + byte queue, shared by both builds
 src/decoy.js          # decoy cover page, shared by both builds
 src/node/             # Node.js server build

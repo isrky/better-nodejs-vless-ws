@@ -1,33 +1,43 @@
 {
+  "dns": {
+    "tag": "dns-inbound",
+    "servers": [
+      "tcp://1.1.1.1"
+    ]
+  },
   "routing": {
     "rules": [
       {
-        "network": "tcp,udp",
-        "port": "53",
+        "inboundTag": [
+          "dns-inbound"
+        ],
         "outboundTag": "vless"
       },
       {
+        "network": "tcp,udp",
+        "port": "53",
+        "outboundTag": "dns-outbound"
+      },
+      {
         "network": "udp",
-        "outboundTag": "block"
+        "outboundTag": "${UDP_OUTBOUND}"
       }
     ]
   },
   "inbounds": [
     {
-      "tag": "socks-in",
+      "tag": "tproxy-in",
       "listen": "127.0.0.1",
-      "port": 10808,
-      "protocol": "socks",
+      "port": 12345,
+      "protocol": "dokodemo-door",
       "settings": {
-        "auth": "noauth",
-        "udp": true
+        "network": "tcp,udp",
+        "followRedirect": true
       },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": [
-          "http",
-          "tls"
-        ]
+      "streamSettings": {
+        "sockopt": {
+          "tproxy": "tproxy"
+        }
       }
     }
   ],
@@ -38,11 +48,11 @@
       "settings": {
         "vnext": [
           {
-            "address": "<your-host>",
+            "address": "${HOST}",
             "port": 443,
             "users": [
               {
-                "id": "<your-uuid>",
+                "id": "${UUID}",
                 "encryption": "none"
               }
             ]
@@ -53,32 +63,34 @@
         "network": "ws",
         "security": "tls",
         "tlsSettings": {
-          "serverName": "<your-host>",
+          "serverName": "${HOST}",
           "certificates": [
             {
               "usage": "verify",
               "certificate": [
-                "-----BEGIN CERTIFICATE-----",
-                "<your network's TLS-interception CA, base64 lines>",
-                "-----END CERTIFICATE-----"
+                "${CA_PEM_LINES}"
               ]
             }
           ]
         },
         "wsSettings": {
-          "path": "/<your-wspath>?ed=2048",
-          "host": "<your-host>"
+          "path": "${WSPATH}",
+          "host": "${HOST}"
         },
         "sockopt": {
-          "domainStrategy": "UseIPv4"
+          "mark": 2
         }
       },
       "mux": {
         "enabled": true,
-        "concurrency": -1,
+        "concurrency": 8,
         "xudpConcurrency": 1024,
-        "xudpProxyUDP443": "reject"
+        "xudpProxyUDP443": "${XUDP_443}"
       }
+    },
+    {
+      "tag": "dns-outbound",
+      "protocol": "dns"
     },
     {
       "tag": "block",
