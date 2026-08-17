@@ -69,8 +69,11 @@ async function login(port) {
 }
 
 /** Mint an invite through the UI and return its token. */
-async function mint(port, cookie, label = 'alice') {
-  const body = (await bodyOf(port, `/admin-stats/provision?label=${label}`, 'GET', cookie)).toString();
+async function mint(port, cookie, label = 'alice', udp = false) {
+  // Returns the tail after /i/ — the token, plus ?udp=1 when the operator asked
+  // for it, because that query is part of what gets handed over.
+  const q = `?label=${label}` + (udp ? '&udp=1' : '');
+  const body = (await bodyOf(port, `/admin-stats/provision${q}`, 'GET', cookie)).toString();
   const m = body.match(/id="qr-data">([^<]*)</);
   assert.ok(m, 'the provision page must show an invite URL');
   return m[1].split('/i/')[1];
@@ -263,16 +266,57 @@ test('?udp=1 is still there for anyone who wants QUIC tunnelled too', async (t) 
   assert.equal(conf.outbounds[0].mux.xudpProxyUDP443, 'allow');
 });
 
-test('the reveal page offers exactly one config download', async (t) => {
-  // Two buttons was the footgun: the prominent one was the broken one.
+test('the reveal page offers exactly one config download, either way', async (t) => {
+  // Two buttons was the footgun: the prominent one was the broken one. The
+  // operator's toggle must not put the choice back in front of the invitee —
+  // the invariant is ONE button, not "never QUIC".
   const srv = await start();
   t.after(() => srv.close());
-  const token = await mint(srv.port, await login(srv.port));
+  const cookie = await login(srv.port);
 
-  const { body } = await fetchOf(srv.port, `/i/${token}/show`);
-  const html = body.toString();
-  assert.equal((html.match(/conf\.json/g) || []).length, 1);
-  assert.ok(!html.includes('udp=1'), 'the escape hatch stays unadvertised');
+  for (const udp of [false, true]) {
+    const tail = await mint(srv.port, cookie, 'alice', udp);
+    const { body } = await fetchOf(srv.port, `/i/${tail.split('?')[0]}/show${udp ? '?udp=1' : ''}`);
+    const html = body.toString();
+
+    assert.equal((html.match(/conf\.json/g) || []).length, 1, `udp=${udp}: one download only`);
+    assert.equal(html.includes('udp=1'), udp, `udp=${udp}: the query is carried, not offered`);
+  }
+});
+
+test('the operator toggle rides the invite URL through every hop', async (t) => {
+  // Landing -> show -> conf.json. Dropping the query at any one hop silently
+  // serves the other policy, and the file still looks plausible.
+  const srv = await start();
+  t.after(() => srv.close());
+  const cookie = await login(srv.port);
+
+  const tail = await mint(srv.port, cookie, 'alice', true);
+  assert.match(tail, /\?udp=1$/, 'the minted invite URL carries the toggle');
+  const token = tail.split('?')[0];
+
+  const landing = (await fetchOf(srv.port, `/i/${token}?udp=1`)).body.toString();
+  assert.match(landing, /\/show\?udp=1/, 'the landing page must pass it on');
+
+  const reveal = (await fetchOf(srv.port, `/i/${token}/show?udp=1`)).body.toString();
+  assert.match(reveal, /conf\.json\?udp=1/, 'and the reveal page must too');
+});
+
+test('without the toggle nothing downstream mentions it', async (t) => {
+  const srv = await start();
+  t.after(() => srv.close());
+
+  const tail = await mint(srv.port, await login(srv.port));
+  assert.ok(!tail.includes('udp'), 'a plain mint yields a bare invite URL');
+});
+
+test('the provision form offers the toggle', async (t) => {
+  const srv = await start();
+  t.after(() => srv.close());
+
+  const html = (await bodyOf(srv.port, '/admin-stats/provision', 'GET', await login(srv.port))).toString();
+  assert.match(html, /name="udp" value="1"/);
+  assert.match(html, /type="checkbox"/);
 });
 
 test('a revoked user reads exactly like an expired invite', async (t) => {

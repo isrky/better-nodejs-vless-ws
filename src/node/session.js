@@ -426,10 +426,10 @@ class Session {
     return /^[a-z0-9.-]{1,253}$/.test(raw) ? raw : '';
   }
 
-  #inviteUrl(req, token, suffix = '') {
+  #inviteUrl(req, token, suffix = '', query = '') {
     const host = req.headers.host || this.#publicHost(req);
     const scheme = this.#isSecure(req) ? 'https' : 'http';
-    return `${scheme}://${host}${this.config.invitePath}${token}${suffix}`;
+    return `${scheme}://${host}${this.config.invitePath}${token}${suffix}${query}`;
   }
 
   /** Operator page: pick a user, mint a short-lived invite. */
@@ -443,6 +443,9 @@ class Session {
 
     const params = new URLSearchParams(req.query || '');
     const label = params.get('label');
+    // Operator-side only. The invitee never chooses — a second download button
+    // on their page is what silently cost them Roblox and Discord voice.
+    const udp = params.get('udp') === '1';
 
     let minted = null;
     const user = label ? this.config.registry.mintable(label) : null;
@@ -458,7 +461,8 @@ class Session {
       );
       minted = {
         label: user.label,
-        url: this.#inviteUrl(req, token),
+        udp,
+        url: this.#inviteUrl(req, token, '', udp ? '?udp=1' : ''),
         expiresAt: new Date(exp * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC'
       };
       this.log('PROVISION', `Invite minted for ${user.label}, expires ${minted.expiresAt}`);
@@ -515,11 +519,15 @@ class Session {
 
     if (!result.ok) return stale();
 
+    // Carried across every hop: landing -> show -> conf.json. Dropping it at
+    // any one of them silently serves the other policy.
+    const qs = new URLSearchParams(req.query || '').get('udp') === '1' ? '?udp=1' : '';
+
     // The landing page burns nothing: chat clients fetch a pasted URL to build
     // a preview, and burning here would kill the invite before the human taps.
     if (action === '') {
       sendHttpResponse(this.#client, 200, HTML, renderInvitePage({
-        showUrl: this.config.invitePath + token + '/show'
+        showUrl: this.config.invitePath + token + '/show' + qs
       }));
       return this.destroy('Invite landing served');
     }
@@ -566,7 +574,7 @@ class Session {
     sendHttpResponse(this.#client, 200, HTML, renderRevealPage({
       label: user.label,
       link: buildVlessLink({ ...profile, label: user.label }),
-      confUrl: this.config.invitePath + token + '/conf.json'
+      confUrl: this.config.invitePath + token + '/conf.json' + qs
     }), ['Referrer-Policy: no-referrer']);
     this.destroy('Invite revealed');
   }

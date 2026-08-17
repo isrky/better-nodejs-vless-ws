@@ -158,6 +158,8 @@ function renderProvisionPage({ labels, minted = null, publicHost = '', adminPath
             <hgroup>
                 <h2>Invite for ${escapeHtml(minted.label)}</h2>
                 <p>Expires ${escapeHtml(minted.expiresAt)} &mdash; scan or send it before then.</p>
+                <p><small>UDP policy: <strong>${minted.udp ? 'QUIC tunnelled too' : 'QUIC blocked (default)'}</strong>
+                &mdash; downloads as <code>vless-${escapeHtml(minted.label)}${minted.udp ? '-udp' : ''}.json</code></small></p>
             </hgroup>
 ${qrBlock(minted.url)}
             <p class="warn"><small>Anyone who opens this link before it expires gets
@@ -182,6 +184,13 @@ ${hostWarning}
             <select id="label" name="label" required>
                 ${options}
             </select>
+            <label for="udp">
+                <input type="checkbox" id="udp" name="udp" value="1">
+                Tunnel QUIC as well
+            </label>
+            <small>For comparing. The default blocks QUIC so browsers stay on
+            TCP/TLS; ordinary UDP &mdash; games, voice chat &mdash; is tunnelled
+            either way.</small>
             <button type="submit"${labels.length === 0 ? ' disabled' : ''}>Create invite</button>
         </form>
 ${emptyNote}
