@@ -17,6 +17,7 @@ const tls = require('tls');
 const { loadConfig } = require('./config.js');
 const { createStats } = require('./stats.js');
 const { createDnsCache } = require('./dnscache.js');
+const { createDohResolver } = require('./doh.js');
 const { defaultTlsCredentials, looksLikeTls } = require('./tlscert.js');
 const { log: defaultLog } = require('./log.js');
 const { createBurnStore } = require('./tokens.js');
@@ -39,8 +40,14 @@ function createServer(options = {}) {
   const dns = options.dns || createDnsCache({
     ttl: config.dnsTtl,
     sweepInterval: config.dnsSweep,
-    logger: log
+    logger: log,
+    // Falls through to the system resolver when DOH_URL is unset, and also
+    // whenever DoH fails — see the breaker in doh.js.
+    resolver: config.dohUrl
+      ? createDohResolver({ url: config.dohUrl, timeoutMs: config.dohTimeoutMs, logger: log })
+      : undefined
   });
+  if (config.dohUrl) log('INFO', `DNS via ${config.dohUrl} (system resolver on failure)`);
   const credentials = options.tlsCredentials || defaultTlsCredentials;
   const burn = options.burn || createBurnStore();
 

@@ -89,6 +89,10 @@ function loadConfig(env = process.env) {
     host: env.SERVER_HOST || env.HOST || '0.0.0.0',
     dnsTtl: 300,
     dnsSweep: 60,
+    // Unset means the system resolver, exactly as before — this is opt-in, and
+    // the fallback path is the same code either way.
+    dohUrl: String(env.DOH_URL || '').trim(),
+    dohTimeoutMs: clamp(parseInt(env.DOH_TIMEOUT_MS || '3000', 10), 200, 15000),
     maxHeaderBytes: DEFAULT_MAX_HEADER_BYTES
   });
 }

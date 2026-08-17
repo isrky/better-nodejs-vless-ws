@@ -18,6 +18,13 @@ primary_region = 'ams'
   # via isrky-edge.fly.dev would produce configs pointing at that name instead.
   PUBLIC_HOST = 'edge.isrky.dev'
 
+  # Resolve destination hostnames here instead of through Fly's resolvers, so
+  # the query stream is not visible to Fly's network or anything upstream of it.
+  # Also not a secret. If it is unreachable the server logs and falls back to
+  # the system resolver, so an outage here degrades rather than breaks — see the
+  # breaker in src/node/doh.js.
+  DOH_URL = 'https://dns.isrky.dev/dns-query'
+
 [http_service]
   internal_port = 3000
   force_https = true

@@ -97,6 +97,11 @@ Provisioning (see [Provisioning other people's devices](#provisioning-other-peop
 | `SESSION_TTL_SECONDS` | `43200` | Admin cookie lifetime. |
 | `INTERCEPT_CA` | *(built-in)* | Override the CA embedded in generated configs. Empty string omits it. |
 | `TRUST_PROXY` | auto | `1`/`0`. Auto-detected from `FLY_APP_NAME`; controls whether `X-Forwarded-Proto` and `Fly-Client-IP` are believed. |
+| `DOH_URL` | *(unset)* | Resolve destination hostnames over DNS-over-HTTPS (RFC 8484) instead of the system resolver. Unset → system resolver, unchanged. |
+| `DOH_TIMEOUT_MS` | `3000` | Per-query timeout before falling back. Clamped to 200–15000. |
+
+> [!NOTE]
+> `DOH_URL` covers **both** paths: UDP sends go through the existing DNS cache, and TCP connections get a `lookup` backed by the same cache — otherwise `net.createConnection` would keep using `getaddrinfo` and most lookups would quietly bypass DoH. A failure falls back to the system resolver, and after three consecutive failures a breaker stops calling out for 30 s, so a resolver outage costs one timeout rather than one per lookup.
 
 **Example:**
 

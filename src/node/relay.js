@@ -6,9 +6,35 @@
 // after the header is opaque payload. Mirrors src/worker/relay.mjs.
 
 const net = require('net');
+const dns = require('dns');
 
 const { OPCODE } = require('./wsframe.js');
 const { ByteQueue } = require('../vless.js');
+
+/**
+ * Resolve through the session's DNS cache instead of getaddrinfo.
+ *
+ * Without this the TCP path silently keeps using the system resolver: the cache
+ * is only wired into UDP sends, so a DoH resolver would cover a fraction of
+ * lookups while looking finished. It also removes an uncached getaddrinfo per
+ * connection.
+ *
+ * The cache is A-only, so anything it cannot answer — an IPv6-only host, most
+ * obviously — falls through to Node's own lookup rather than becoming
+ * unreachable.
+ */
+function cachedLookup(session) {
+  if (!session.dns || typeof session.dns.resolve !== 'function') return undefined;
+
+  return function lookup(hostname, options, callback) {
+    session.dns.resolve(hostname, (err, address) => {
+      if (err || !address) return dns.lookup(hostname, options, callback);
+      // net asks for the array form when it wants every candidate.
+      if (options && options.all) return callback(null, [{ address, family: 4 }]);
+      callback(null, address, 4);
+    });
+  };
+}
 
 /**
  * @param {Session} session  see the contract at the top of session.js
@@ -27,7 +53,7 @@ function createTcpRelay(session, host, port, initial) {
 
   if (initial && initial.length > 0) pendingWrites.push(initial);
 
-  const target = net.createConnection({ host, port }, () => {
+  const target = net.createConnection({ host, port, lookup: cachedLookup(session) }, () => {
     connected = true;
     if (pendingWrites.size === 0) return;
     const buffered = pendingWrites.flatten();

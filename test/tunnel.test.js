@@ -15,6 +15,7 @@ const dgram = require('dgram');
 
 const { createServer } = require('../src/node/server.js');
 const { loadConfig } = require('../src/node/config.js');
+const { createDnsCache } = require('../src/node/dnscache.js');
 const {
   connectWs, vlessHeader, muxFrame, muxNewMeta, muxNewDomainMeta, muxKeepMeta
 } = require('./helpers/wsclient.js');
@@ -345,4 +346,83 @@ test('a validated tunnel IS counted', { timeout: 15000 }, async (t) => {
   assert.equal(snap.activeConnections, 1);
   assert.equal(snap.active[0].lastHost, `127.0.0.1:${echo.port}`);
   assert.ok(snap.totalBytesTx > 0, 'and its bytes are attributed');
+});
+
+// ---------- the TCP path resolves through the DNS cache ----------
+
+test('a TCP tunnel to a hostname resolves through the injected resolver',
+  { timeout: 15000 }, async (t) => {
+  // The half of DoH that is easy to leave out: the cache is wired into UDP
+  // sends, while net.createConnection resolves through getaddrinfo. Without
+  // the lookup override this hostname would go to the system resolver, which
+  // has never heard of it, and the connection would fail.
+  const echo = await startTcpEcho();
+
+  let asked = null;
+  const dnsCache = createDnsCache({
+    ttl: 300,
+    sweepInterval: 60,
+    logger: quiet,
+    resolver: { resolve4: (host, cb) => { asked = host; cb(null, ['127.0.0.1']); } }
+  });
+  t.after(() => dnsCache.stop());
+
+  const handle = createServer({ config, logger: quiet, dns: dnsCache });
+  const open = new Set();
+  handle.server.on('connection', (s) => { open.add(s); s.on('close', () => open.delete(s)); });
+  await new Promise((r) => handle.server.listen(0, '127.0.0.1', r));
+  const port = handle.server.address().port;
+  t.after(async () => {
+    await new Promise((done) => { handle.close(done); for (const s of open) s.destroy(); });
+    await echo.close();
+  });
+
+  const ws = await connectWs(port);
+  t.after(() => ws.close());
+
+  ws.send(Buffer.concat([
+    vlessHeader(config.uuidBytes, 1, 'nowhere.invalid', echo.port),
+    Buffer.from('hello')
+  ]));
+
+  assert.deepEqual(await ws.next(), Buffer.from([0x00, 0x00]));
+  assert.equal((await ws.next()).toString(), 'HELLO');
+  assert.equal(asked, 'nowhere.invalid', 'the cache resolver saw the lookup');
+});
+
+test('a hostname the cache cannot resolve still falls through to the system lookup',
+  { timeout: 15000 }, async (t) => {
+  // The cache is A-only, so an IPv6-only host must not become unreachable.
+  const echo = await startTcpEcho();
+
+  const dnsCache = createDnsCache({
+    ttl: 300,
+    sweepInterval: 60,
+    logger: quiet,
+    resolver: { resolve4: (host, cb) => cb(new Error('no A record')) }
+  });
+  t.after(() => dnsCache.stop());
+
+  const handle = createServer({ config, logger: quiet, dns: dnsCache });
+  const open = new Set();
+  handle.server.on('connection', (s) => { open.add(s); s.on('close', () => open.delete(s)); });
+  await new Promise((r) => handle.server.listen(0, '127.0.0.1', r));
+  const port = handle.server.address().port;
+  t.after(async () => {
+    await new Promise((done) => { handle.close(done); for (const s of open) s.destroy(); });
+    await echo.close();
+  });
+
+  const ws = await connectWs(port);
+  t.after(() => ws.close());
+
+  // localhost is in /etc/hosts, so the system lookup answers it even though the
+  // cache refused.
+  ws.send(Buffer.concat([
+    vlessHeader(config.uuidBytes, 1, 'localhost', echo.port),
+    Buffer.from('hello')
+  ]));
+
+  assert.deepEqual(await ws.next(), Buffer.from([0x00, 0x00]));
+  assert.equal((await ws.next()).toString(), 'HELLO');
 });

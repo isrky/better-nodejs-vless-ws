@@ -45,60 +45,58 @@ function createDnsCache(opts = {}) {
   sweep.unref();
 
   /**
-   * Send `payload` to host:port, resolving `host` through the cache first.
+   * Resolve `host` to a single IPv4 address through the cache.
    *
-   * IP literals bypass the resolver entirely. Concurrent sends to the same
-   * unresolved host share one lookup and are flushed together.
+   * IP literals bypass the resolver entirely. Concurrent callers for the same
+   * cold host share one lookup and are flushed together. Literals, cache hits
+   * and an empty host call back synchronously — the UDP path depends on that.
    */
-  function resolveAndSend(sock, payload, port, host, callback) {
-    if (!host) return callback && callback('Empty Host');
-
-    function send(address) {
-      if (!sock) return;
-      sock.send(payload, port, address, callback);
-    }
+  function resolve(host, cb) {
+    if (!host) return cb('Empty Host');
 
     // Dotted quad, or anything with a colon (IPv6 literal) — nothing to look up.
-    if (IPV4_LITERAL.test(host) || host.includes(':')) return send(host);
+    if (IPV4_LITERAL.test(host) || host.includes(':')) return cb(null, host);
 
     const t = seconds();
     const entry = cache.get(host);
-    if (entry && t < entry.expires) return send(entry.address);
+    if (entry && t < entry.expires) return cb(null, entry.address);
 
     const queued = pending.get(host);
     if (queued) {
-      queued.push({ sock, payload, port, callback });
+      queued.push(cb);
       return;
     }
-    pending.set(host, [{ sock, payload, port, callback }]);
+    pending.set(host, [cb]);
 
     resolver.resolve4(host, (err, addresses) => {
-      const queue = pending.get(host);
+      const queue = pending.get(host) || [];
       pending.delete(host);
 
       if (!err && addresses && addresses[0]) {
         const address = addresses[0];
         cache.set(host, { address, expires: seconds() + ttl });
-        if (queue) {
-          for (const item of queue) {
-            try {
-              if (item.sock) item.sock.send(item.payload, item.port, address, item.callback);
-            } catch (e) { /* socket closed while we were resolving */ }
-          }
-        }
+        for (const item of queue) item(null, address);
         return;
       }
 
       logger('WARN', 'DNS Resolution Failed: ' + host);
-      if (queue) {
-        for (const item of queue) {
-          if (item.callback) item.callback(err || 'Resolution Failed');
-        }
-      }
+      for (const item of queue) item(err || 'Resolution Failed');
+    });
+  }
+
+  /** Send `payload` to host:port, resolving `host` through the cache first. */
+  function resolveAndSend(sock, payload, port, host, callback) {
+    resolve(host, (err, address) => {
+      if (err) return callback && callback(err);
+      if (!sock) return;
+      try {
+        sock.send(payload, port, address, callback);
+      } catch (e) { /* socket closed while we were resolving */ }
     });
   }
 
   return {
+    resolve,
     resolveAndSend,
     clear() {
       cache.clear();
