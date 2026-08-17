@@ -23,7 +23,13 @@ primary_region = 'ams'
   # Also not a secret. If it is unreachable the server logs and falls back to
   # the system resolver, so an outage here degrades rather than breaks — see the
   # breaker in src/node/doh.js.
-  DOH_URL = 'https://dns.isrky.dev/dns-query'
+  #
+  # The /flyio suffix is an AdGuard Home client id, so this machine's queries
+  # are attributed separately in its statistics rather than merged with every
+  # other device. It is part of the path, so changing it changes the endpoint —
+  # a typo here does not error, it just silently falls back to the system
+  # resolver and the queries stop appearing under that client.
+  DOH_URL = 'https://dns.isrky.dev/dns-query/flyio'
 
 [http_service]
   internal_port = 3000
