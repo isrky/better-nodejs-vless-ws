@@ -58,8 +58,20 @@ function buildVlessLink({ uuid, host, port = 443, wsPath = '/', label = '' }) {
  * Blocking UDP conceals nothing: tunnelled UDP is encapsulated in the
  * WebSocket/TLS carrier, so the network sees identical bytes under every
  * policy. 'none' therefore only breaks applications, which is why it is no
- * longer the default. Refusing QUIC is kept for a different reason — QUIC
- * carried over a TCP tunnel degrades badly, so forcing TCP/TLS is faster.
+ * longer the default.
+ *
+ * Refusing QUIC is a weaker call, and worth stating honestly rather than as a
+ * rule. It does NOT avoid nesting — the browser then runs TCP inside our TCP
+ * tunnel, so it is reliable-over-reliable either way. What actually differs:
+ * against tunnelling QUIC, each datagram is framed individually through
+ * xudp/mux, QUIC's own crypto stacks on top of the tunnel's TLS, and one
+ * stalled flow can head-of-line-block others sharing the mux stream; for it,
+ * QUIC's loss recovery beats TCP's, and a blackholed attempt costs the browser
+ * a timeout before it falls back rather than failing fast.
+ *
+ * So 'noquic' is the default because it matches common practice and is the
+ * safer starting point, not because the tradeoff is settled. Mint an invite
+ * with ?udp=1 to compare the two on a real device.
  */
 function buildXrayConfig({ uuid, host, port = 443, wsPath = '/', udpPolicy = 'noquic', ca = null }) {
   const pem = ca === null ? INTERCEPT_CA_PEM : ca;

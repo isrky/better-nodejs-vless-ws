@@ -207,7 +207,12 @@ Then open `/admin-stats/provision`, pick a user, and send them the link. It expi
 
 **What the invitee gets.** The landing page carries no credential — chat apps fetch pasted URLs to build previews, and burning the invite there would kill it before the human taps. Tapping through reveals a `vless://` link (one tap into v2rayNG, Streisand, Hiddify or NekoBox), a QR of it, and a **full JSON config download**. The download exists because a share link structurally cannot carry a certificate: on a [TLS-intercepting network](#networks-that-intercept-tls) only the JSON works.
 
-That config tunnels UDP, so games and voice chat — Roblox, Discord — work. QUIC (UDP/443) is the one exception: it is blocked so browsers stay on TCP/TLS, because QUIC carried over a WebSocket/TCP tunnel degrades badly. Append `?udp=1` to the download URL to tunnel QUIC as well.
+That config tunnels UDP, so games and voice chat — Roblox, Discord — work. QUIC (UDP/443) is the one exception: it is blocked by default, so browsers stay on TCP/TLS.
+
+> [!NOTE]
+> **Blocking QUIC is a default, not a verdict.** It does not avoid nesting — the browser then runs TCP inside a TCP tunnel, which is reliable-over-reliable either way. Tunnelling QUIC costs per-datagram framing through xudp/mux, a second layer of crypto, and head-of-line blocking when flows share a mux stream; against that, QUIC's loss recovery is better than TCP's, and a blackholed attempt makes the browser wait out a timeout instead of failing fast. Which wins depends on your path, so it is worth measuring rather than assuming.
+>
+> Tick **Tunnel QUIC as well** on the provisioning page to mint an invite with the other policy. The downloads are named `vless-<label>.json` and `vless-<label>-udp.json`, so the two are easy to keep apart while comparing.
 
 **Revoking.** Drop the label from `USERS` and redeploy. Their credential stops authenticating immediately, including any live tunnel, and nobody else is affected.
 
