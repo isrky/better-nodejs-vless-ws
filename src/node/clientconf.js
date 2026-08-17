@@ -1,45 +1,18 @@
 'use strict';
 
-// Client artefacts handed to a provisioned user: a vless:// share link and a
-// complete Xray config.
+// The Xray config handed to a provisioned user.
 //
-// Both are needed, and the reason is the whole shape of the invite page:
-//
-//   * The link is one tap on a phone — v2rayNG and sing-box register the
-//     scheme — but the vless:// URI format has NO slot for a certificate, so
-//     it cannot carry the interception CA.
-//   * The JSON can carry the CA, so it is the only thing that works on a
-//     network that terminates and re-signs TLS.
+// One artefact, not two. A vless:// share link used to sit alongside it, but the
+// URI format has no slot for a certificate, so it could never carry the
+// interception CA — on the networks this exists for it was the prominent option
+// that could not work. The JSON is not a fallback for those networks either:
+// `usage: "verify"` without `disableSystemRoot` means Xray APPENDS the pinned CA
+// to the system roots rather than replacing them, so the same file verifies a
+// real certificate on an ordinary network and a re-signed one at school.
 //
 // Pure and dependency-free: no I/O, no env reads, no clock.
 
 const { INTERCEPT_CA_PEM } = require('./interceptca.js');
-
-/**
- * Build a v2rayNG/sing-box-compatible share link.
- *
- * Field order is kept byte-identical to the one tools/qr.mjs has always
- * produced, and pinned by a golden test.
- *
- * Three fields are deliberately never emitted:
- *   alpn  — Xray's WebSocket dialer already pins http/1.1; setting
- *           ["h2","http/1.1"] breaks the upgrade outright.
- *   fp    — no fingerprint is configured on any of our profiles.
- *   allowInsecure — removed in Xray v26.2.6; a config carrying it refuses to
- *           start rather than warning.
- */
-function buildVlessLink({ uuid, host, port = 443, wsPath = '/', label = '' }) {
-  const params = new URLSearchParams();
-  params.set('encryption', 'none');
-  params.set('security', 'tls');
-  params.set('sni', host);
-  params.set('type', 'ws');
-  params.set('host', host);
-  params.set('path', wsPath);
-
-  const tag = label ? `${label}@${host}` : host;
-  return `vless://${uuid}@${host}:${port}?${params.toString()}#${encodeURIComponent(tag)}`;
-}
 
 /**
  * Build a complete Xray client config.
@@ -132,4 +105,4 @@ function buildXrayConfig({ uuid, host, port = 443, wsPath = '/', udpPolicy = 'no
   };
 }
 
-module.exports = { buildVlessLink, buildXrayConfig };
+module.exports = { buildXrayConfig };

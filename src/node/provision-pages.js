@@ -68,43 +68,65 @@ window.addEventListener('load', function () {
   }
 });
 
+`;
+
+/**
+ * Wire every <button data-copy="ID"> to the text of the element with that id.
+ *
+ * Split from QR_CLIENT_JS because the reveal page needs copy without a canvas —
+ * keeping them fused would pull a jsDelivr <script> onto a page that draws
+ * nothing. Generic over buttons so several can coexist.
+ */
+const COPY_CLIENT_JS = `
 window.addEventListener('load', function () {
-  var btn = document.getElementById('copy');
-  var source = document.getElementById('qr-data');
-  if (!btn || !source) return;
-  btn.addEventListener('click', function () {
-    function selectIt() {
-      var range = document.createRange();
-      range.selectNodeContents(source);
-      var sel = getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
-      btn.textContent = 'Selected \\u2014 long-press to copy';
-    }
-    // navigator.clipboard needs a secure context; selection is the fallback.
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(source.textContent).then(function () {
-        btn.textContent = 'Copied';
-      }, selectIt);
-    } else {
-      selectIt();
-    }
-  });
+  var buttons = document.querySelectorAll('[data-copy]');
+  for (var i = 0; i < buttons.length; i++) (function (btn) {
+    var source = document.getElementById(btn.getAttribute('data-copy'));
+    if (!source) return;
+    var label = btn.textContent;
+    btn.addEventListener('click', function () {
+      function selectIt() {
+        // selectNodeContents cannot reach display:none text, so reveal any
+        // collapsed <details> around it first.
+        var d = source.closest ? source.closest('details') : null;
+        if (d) d.open = true;
+        var range = document.createRange();
+        range.selectNodeContents(source);
+        var sel = getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        btn.textContent = 'Selected \\u2014 long-press to copy';
+      }
+      // navigator.clipboard needs a secure context; selection is the fallback.
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(source.textContent).then(function () {
+          btn.textContent = 'Copied';
+          setTimeout(function () { btn.textContent = label; }, 2000);
+        }, selectIt);
+      } else {
+        selectIt();
+      }
+    });
+  })(buttons[i]);
 });
 `;
 
 const STYLE = `
         .qr-wrap { text-align: center; }
         #qr { max-width: 100%; height: auto; border-radius: 8px; }
-        #qr-data {
+        #qr-data, #conf-json {
             display: block; overflow-wrap: anywhere; user-select: all;
             padding: .6rem; font-size: .8rem;
         }
+        #conf-json { max-height: 14rem; overflow: auto; white-space: pre-wrap; }
         .warn { border-left: 4px solid var(--pico-del-color, #c33); padding-left: 1rem; }
 `;
 
-/** Shared document shell. `qr` pulls in the CDN script and the canvas wiring. */
-function page({ title, body, qr = false }) {
+/**
+ * Shared document shell. `qr` pulls in the CDN script and the canvas wiring and
+ * implies `copy`; `copy` alone adds only the (dependency-free) copy wiring.
+ */
+function page({ title, body, qr = false, copy = false }) {
   return `<!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
@@ -122,6 +144,7 @@ ${qr ? `    <script src="${QR_SRC}" integrity="${QR_SRI}" crossorigin="anonymous
 ${body}
     </main>
 ${qr ? `    <script>${QR_CLIENT_JS}</script>` : ''}
+${qr || copy ? `    <script>${COPY_CLIENT_JS}</script>` : ''}
 </body>
 </html>`;
 }
@@ -134,7 +157,7 @@ function qrBlock(text) {
             <p id="qr-note" hidden><small>QR unavailable &mdash; use the link below instead.</small></p>
         </div>
         <code id="qr-data">${escapeHtml(text)}</code>
-        <button id="copy" class="secondary">Copy link</button>`;
+        <button data-copy="qr-data" class="secondary">Copy link</button>`;
 }
 
 // ==========================================
@@ -222,30 +245,28 @@ function renderInvitePage({ showUrl }) {
 }
 
 /** The reveal page: this is the one that actually hands over a credential. */
-function renderRevealPage({ label, link, confUrl }) {
+function renderRevealPage({ label, confUrl, configJson }) {
   return page({
     title: 'Your connection',
-    qr: true,
+    copy: true,
     body: `        <hgroup>
             <h1>Set up ${escapeHtml(label)}</h1>
             <p>Install a client first &mdash; v2rayNG, Streisand, Hiddify or NekoBox.</p>
         </hgroup>
 
         <article>
-            <h2>1. Ordinary networks</h2>
-            <p><a href="${escapeHtml(link)}" role="button">Add to your VPN app</a></p>
-            <p><small>Or scan this from another device, or copy the link:</small></p>
-${qrBlock(link)}
-        </article>
-
-        <article>
-            <h2>2. School or work Wi-Fi</h2>
-            <p>If the link above connects but nothing loads, that network inspects
-            TLS. Use this file instead &mdash; it includes the certificate such a
-            network requires, which a share link cannot carry.</p>
-            <p><a href="${escapeHtml(confUrl)}" role="button" class="secondary">Download configuration</a></p>
-            <p><small>Import it as a <strong>Custom config</strong> in your client.
-            Games and voice chat work with this file.</small></p>
+            <h2>Your configuration</h2>
+            <p>Import it as a <strong>Custom config</strong>. It carries the certificate
+            a TLS-inspecting network requires, and works on ordinary networks too.</p>
+            <p>
+                <a href="${escapeHtml(confUrl)}" role="button" class="secondary">Download</a>
+                <button data-copy="conf-json" class="secondary outline">Copy configuration</button>
+            </p>
+            <details>
+                <summary><small>Show configuration</small></summary>
+                <code id="conf-json">${escapeHtml(configJson)}</code>
+            </details>
+            <p><small>Games and voice chat work with this file.</small></p>
         </article>
 
         <p><small>This page stops working in a few minutes.</small></p>`

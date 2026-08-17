@@ -209,7 +209,7 @@ test('the reveal page hands over exactly the derived credential', async (t) => {
   const uuid = deriveUser(SECRET, 'alice').uuid;
 
   assert.match(body, /Set up alice/);
-  assert.ok(body.includes(`vless://${uuid}@edge.example.dev:443`));
+  assert.ok(body.includes(uuid), 'the page carries their own credential, in the config');
   assert.ok(!body.includes(SECRET), 'the master secret must never be rendered');
   assert.ok(!body.includes('s3cret'));
   assert.ok(!body.includes(deriveUser(SECRET, 'bob').uuid), 'nor anyone else s credential');
@@ -335,11 +335,13 @@ test('a revoked user reads exactly like an expired invite', async (t) => {
 });
 
 test('the QR script is pinned by exact version and SRI', async (t) => {
+  // The QR now lives only on the operator's page: the invitee page dropped the
+  // share link it used to encode, so it no longer loads this script at all.
   const srv = await start();
   t.after(() => srv.close());
-  const token = await mint(srv.port, await login(srv.port));
 
-  const body = (await bodyOf(srv.port, `/i/${token}/show`)).toString();
+  const body = (await bodyOf(srv.port, '/admin-stats/provision?label=alice',
+    'GET', await login(srv.port))).toString();
   assert.match(body, /qrcode-generator@1\.4\.4\/qrcode\.js/, 'exact version, never a range');
   assert.match(body, /integrity="sha384-[A-Za-z0-9+/=]+"/);
   assert.match(body, /crossorigin="anonymous"/);
@@ -388,8 +390,54 @@ test('a hostile label cannot break out of the page or the filename', async (t) =
   assert.ok(!picker.includes('<img onerror'));
 
   const reveal = renderRevealPage({
-    label: hostile, link: 'vless://x@y:443', confUrl: '/a'
+    label: hostile, confUrl: '/a', configJson: `{"note": "${hostile}"}`
   });
   assert.ok(!reveal.includes('</script><script>alert'));
   assert.ok(!reveal.includes('<img onerror'));
+});
+
+// ---------- the invitee page is one artefact ----------
+
+/** Pull the embedded config out of the reveal page. */
+function embedded(html) {
+  const m = html.match(/<code id="conf-json">([\s\S]*?)<\/code>/);
+  assert.ok(m, 'the reveal page must embed the config');
+  return m[1]
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+test('the copy button and the download hand over identical bytes', async (t) => {
+  // Two build sites that could disagree is the failure this area keeps
+  // producing, so assert the bytes rather than the shape.
+  const srv = await start();
+  t.after(() => srv.close());
+  const cookie = await login(srv.port);
+
+  for (const udp of [false, true]) {
+    const tail = await mint(srv.port, cookie, 'alice', udp);
+    const token = tail.split('?')[0];
+    const q = udp ? '?udp=1' : '';
+
+    const page = (await bodyOf(srv.port, `/i/${token}/show${q}`)).toString();
+    const download = (await bodyOf(srv.port, `/i/${token}/conf.json${q}`)).toString();
+
+    assert.equal(embedded(page), download, `udp=${udp}: copy and download disagree`);
+    assert.doesNotThrow(() => JSON.parse(embedded(page)));
+  }
+});
+
+test('the invitee page no longer offers a share link or loads the QR CDN', async (t) => {
+  // The vless:// URI has no slot for a certificate, so on a TLS-inspecting
+  // network it was the prominent option that could not work.
+  const srv = await start();
+  t.after(() => srv.close());
+  const token = await mint(srv.port, await login(srv.port));
+
+  const page = (await bodyOf(srv.port, `/i/${token}/show`)).toString();
+  assert.ok(!page.includes('vless://'), 'no share link');
+  assert.ok(!page.includes('<canvas'), 'no QR canvas');
+  assert.ok(!page.includes('qrcode-generator'), 'and no CDN script for one');
+  assert.match(page, /data-copy="conf-json"/, 'but it can be copied');
 });

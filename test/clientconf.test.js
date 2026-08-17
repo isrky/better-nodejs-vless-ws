@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildVlessLink, buildXrayConfig } = require('../src/node/clientconf.js');
+const { buildXrayConfig } = require('../src/node/clientconf.js');
 const { INTERCEPT_CA_PEM } = require('../src/node/interceptca.js');
 
 const ARGS = {
@@ -14,45 +14,17 @@ const ARGS = {
   label: 'alice'
 };
 
-test('the share link matches its golden form', () => {
-  assert.equal(
-    buildVlessLink(ARGS),
-    'vless://bb3d6381-f832-4549-b607-541f00917947@edge.example.dev:443' +
-    '?encryption=none&security=tls&sni=edge.example.dev&type=ws' +
-    '&host=edge.example.dev&path=%2Fe98e9d20785b7f134144a4e2cdeb74fa' +
-    '#alice%40edge.example.dev'
-  );
-});
-
-test('the link omits the three fields that break Xray', () => {
-  const link = buildVlessLink(ARGS);
-  // alpn breaks the WebSocket upgrade; allowInsecure was removed in v26.2.6 and
-  // a config carrying it refuses to start; fp is not configured on any profile.
-  assert.ok(!link.includes('alpn'));
-  assert.ok(!link.includes('allowInsecure'));
-  assert.ok(!link.includes('fp='));
-});
-
-test('the link is parseable and carries the credential in the userinfo', () => {
-  const url = new URL(buildVlessLink(ARGS));
-  assert.equal(url.protocol, 'vless:');
-  assert.equal(url.username, ARGS.uuid);
-  assert.equal(url.hostname, ARGS.host);
-  assert.equal(url.port, '443');
-  assert.equal(url.searchParams.get('path'), ARGS.wsPath);
-  assert.equal(url.searchParams.get('sni'), ARGS.host);
-});
-
-test('the link label falls back to the host when unlabelled', () => {
-  assert.ok(buildVlessLink({ ...ARGS, label: '' }).endsWith('#edge.example.dev'));
-});
-
 test('the config carries the interception CA by default', () => {
   const conf = buildXrayConfig(ARGS);
   const tls = conf.outbounds[0].streamSettings.tlsSettings;
 
   assert.deepEqual(tls.certificates[0].certificate, INTERCEPT_CA_PEM);
   assert.equal(tls.certificates[0].usage, 'verify');
+  // No disableSystemRoot, so Xray APPENDS this CA to the system roots rather
+  // than replacing them. That is what lets one file work both on a network that
+  // re-signs TLS and on an ordinary one — and why the share link could be
+  // dropped rather than kept as an "ordinary networks" alternative.
+  assert.equal('disableSystemRoot' in tls, false);
   assert.equal(tls.serverName, ARGS.host);
 
   // A copy, so a caller mutating one config cannot corrupt the baked constant.

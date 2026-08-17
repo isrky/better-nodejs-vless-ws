@@ -46,7 +46,7 @@ const { FAKE_INDEX_HTML, renderStatsPage, renderAdminNav } = require('./pages.js
 const {
   renderProvisionPage, renderInvitePage, renderRevealPage, renderStalePage
 } = require('./provision-pages.js');
-const { buildVlessLink, buildXrayConfig } = require('./clientconf.js');
+const { buildXrayConfig } = require('./clientconf.js');
 const { createTcpRelay } = require('./relay.js');
 const { createUdpRelay } = require('./udp.js');
 const { createMuxSession } = require('./mux.js');
@@ -556,14 +556,18 @@ class Session {
       udpPolicy: params.get('udp') === '1' ? 'all' : 'noquic'
     };
 
+    // Built once and shared: the reveal page's copy button and the download
+    // must hand over identical bytes. Two build sites that could drift is the
+    // failure this area keeps producing.
+    const configJson = JSON.stringify(buildXrayConfig({
+      ...profile,
+      ca: this.config.interceptCa ? this.config.interceptCa.split('\\n') : null
+    }), null, 2);
+
     if (action === '/conf.json') {
-      const body = JSON.stringify(buildXrayConfig({
-        ...profile,
-        ca: this.config.interceptCa ? this.config.interceptCa.split('\\n') : null
-      }), null, 2);
       const name = `vless-${user.label}${profile.udpPolicy === 'all' ? '-udp' : ''}.json`;
       this.log('PROVISION', `Config downloaded for ${user.label}`);
-      sendHttpResponse(this.#client, 200, JSON_TYPE, body, [
+      sendHttpResponse(this.#client, 200, JSON_TYPE, configJson, [
         `Content-Disposition: attachment; filename="${name}"`,
         'Referrer-Policy: no-referrer'
       ]);
@@ -573,8 +577,8 @@ class Session {
     this.log('PROVISION', `Invite revealed for ${user.label}`);
     sendHttpResponse(this.#client, 200, HTML, renderRevealPage({
       label: user.label,
-      link: buildVlessLink({ ...profile, label: user.label }),
-      confUrl: this.config.invitePath + token + '/conf.json' + qs
+      confUrl: this.config.invitePath + token + '/conf.json' + qs,
+      configJson
     }), ['Referrer-Policy: no-referrer']);
     this.destroy('Invite revealed');
   }
