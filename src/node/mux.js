@@ -244,7 +244,14 @@ class MuxSession {
 
     if (initial && initial.length > 0) entry.pending.push(initial);
 
-    entry.handle = net.createConnection({ host, port }, () => {
+    // Same cache the plain relay uses. Without it this path resolves through
+    // getaddrinfo, and since every client config we ship enables mux, that
+    // bypasses DoH for nearly all TCP — which looks exactly like the resolver
+    // not working at all.
+    const dnsCache = this.#session.dns;
+    entry.handle = net.createConnection({
+      host, port, lookup: dnsCache && dnsCache.lookup
+    }, () => {
       entry.connected = true;
       if (entry.pending.size === 0) return;
       const buffered = entry.pending.flatten();

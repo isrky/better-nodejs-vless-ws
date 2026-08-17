@@ -426,3 +426,45 @@ test('a hostname the cache cannot resolve still falls through to the system look
   assert.deepEqual(await ws.next(), Buffer.from([0x00, 0x00]));
   assert.equal((await ws.next()).toString(), 'HELLO');
 });
+
+test('a Mux TCP substream to a hostname also resolves through the cache',
+  { timeout: 15000 }, async (t) => {
+  // The regression this exists for: the lookup override was wired into the
+  // plain relay only, while every client config we ship enables mux — so
+  // nearly all TCP kept going to getaddrinfo and DoH saw almost nothing. The
+  // relay test above passed throughout, which is exactly why this one is here.
+  const echo = await startTcpEcho();
+
+  let asked = null;
+  const dnsCache = createDnsCache({
+    ttl: 300,
+    sweepInterval: 60,
+    logger: quiet,
+    resolver: { resolve4: (host, cb) => { asked = host; cb(null, ['127.0.0.1']); } }
+  });
+  t.after(() => dnsCache.stop());
+
+  const handle = createServer({ config, logger: quiet, dns: dnsCache });
+  const open = new Set();
+  handle.server.on('connection', (s) => { open.add(s); s.on('close', () => open.delete(s)); });
+  await new Promise((r) => handle.server.listen(0, '127.0.0.1', r));
+  const port = handle.server.address().port;
+  t.after(async () => {
+    await new Promise((done) => { handle.close(done); for (const s of open) s.destroy(); });
+    await echo.close();
+  });
+
+  const ws = await connectWs(port);
+  t.after(() => ws.close());
+
+  ws.send(vlessHeader(config.uuidBytes, 3));
+  ws.send(muxFrame(muxNewDomainMeta(1, 1, 'nowhere.invalid', echo.port), Buffer.from('hello')));
+
+  assert.deepEqual(await ws.next(), Buffer.from([0x00, 0x00]), 'VLESS OK header first');
+
+  const frame = await ws.next();
+  const metaLen = (frame[0] << 8) | frame[1];
+  const data = frame.subarray(2 + metaLen + 2);
+  assert.equal(data.toString(), 'HELLO');
+  assert.equal(asked, 'nowhere.invalid', 'the mux path must use the cache too');
+});

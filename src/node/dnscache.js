@@ -84,6 +84,27 @@ function createDnsCache(opts = {}) {
     });
   }
 
+  /**
+   * A drop-in for the `lookup` option of net.createConnection.
+   *
+   * This lives here rather than at the call sites because there are two of
+   * them — the plain TCP relay and the Mux substream opener — and wiring only
+   * one leaves the other on getaddrinfo. With mux enabled in every client
+   * config we ship, the mux path carries nearly all traffic, so missing it
+   * looks exactly like the resolver not working at all.
+   *
+   * A-only, so anything it cannot answer (an IPv6-only host, most obviously)
+   * falls through to Node's own lookup rather than becoming unreachable.
+   */
+  function lookup(hostname, options, cb) {
+    resolve(hostname, (err, address) => {
+      if (err || !address) return dns.lookup(hostname, options, cb);
+      // net asks for the array form when it wants every candidate.
+      if (options && options.all) return cb(null, [{ address, family: 4 }]);
+      cb(null, address, 4);
+    });
+  }
+
   /** Send `payload` to host:port, resolving `host` through the cache first. */
   function resolveAndSend(sock, payload, port, host, callback) {
     resolve(host, (err, address) => {
@@ -97,6 +118,7 @@ function createDnsCache(opts = {}) {
 
   return {
     resolve,
+    lookup,
     resolveAndSend,
     clear() {
       cache.clear();
