@@ -64,6 +64,7 @@ test('templates use only known placeholders', () => {
     // profile, so a template naming an env var directly would not substitute.
     assert.ok(!text.includes('FLY_HOST'), `${file} must not name an env var`);
     assert.ok(!text.includes('WORKER_HOST'), `${file} must not name an env var`);
+    assert.ok(!text.includes('DENO_HOST'), `${file} must not name an env var`);
   }
 });
 
@@ -208,13 +209,13 @@ test('normaliseWsPath yields exactly one leading slash', () => {
 
 test('the profile table covers both templates and both udp modes', () => {
   const { PROFILES } = renderer;
-  assert.equal(PROFILES.length, 4);
-  assert.equal(new Set(PROFILES.map((p) => p.out)).size, 4, 'no duplicate outputs');
+  assert.equal(PROFILES.length, 6);
+  assert.equal(new Set(PROFILES.map((p) => p.out)).size, 6, 'no duplicate outputs');
   assert.equal(PROFILES.filter((p) => p.udp).length, 2);
 
   for (const p of PROFILES) {
     assert.ok(templateFiles().includes(p.template), `${p.out}: unknown template ${p.template}`);
-    assert.ok(['FLY_HOST', 'WORKER_HOST'].includes(p.hostVar));
+    assert.ok(['FLY_HOST', 'WORKER_HOST', 'DENO_HOST'].includes(p.hostVar));
     assert.ok(p.out.startsWith('local/'));
   }
 
@@ -223,8 +224,10 @@ test('the profile table covers both templates and both udp modes', () => {
   assert.ok(PROFILES.some((p) => p.out === 'local/conf-android.json'),
     'qr.mjs depends on this filename');
 
-  // The Worker carries no UDP, so it must never be paired with a udp profile.
+  // Only the Fly host carries UDP; the Worker and Deno targets never do, so a
+  // udp profile must be paired with FLY_HOST.
   for (const p of PROFILES) {
     if (p.udp) assert.equal(p.hostVar, 'FLY_HOST', `${p.out}: udp requires the Fly host`);
+    if (p.hostVar === 'DENO_HOST') assert.equal(p.udp, false, `${p.out}: Deno carries no UDP`);
   }
 });

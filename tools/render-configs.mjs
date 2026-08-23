@@ -38,8 +38,10 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const PROFILES = [
   { out: 'local/conf.json', template: 'linux-tproxy.json', hostVar: 'WORKER_HOST', udp: false },
   { out: 'local/conf-udp.json', template: 'linux-tproxy.json', hostVar: 'FLY_HOST', udp: true },
+  { out: 'local/conf-deno.json', template: 'linux-tproxy.json', hostVar: 'DENO_HOST', udp: false },
   { out: 'local/conf-android.json', template: 'android-socks.json', hostVar: 'WORKER_HOST', udp: false },
-  { out: 'local/conf-android-udp.json', template: 'android-socks.json', hostVar: 'FLY_HOST', udp: true }
+  { out: 'local/conf-android-udp.json', template: 'android-socks.json', hostVar: 'FLY_HOST', udp: true },
+  { out: 'local/conf-android-deno.json', template: 'android-socks.json', hostVar: 'DENO_HOST', udp: false }
 ];
 
 const NAME_RE = /\$\{([A-Z0-9_]+)\}/g;
@@ -296,9 +298,19 @@ function renderAll(store) {
   const caLines = loadCaLines(env);
   const cert = validateCa(caLines);
 
+  // A profile whose host is unset is skipped, not failed: DENO_HOST is
+  // optional, so the -deno configs only appear once a Deno Deploy target
+  // exists. Announced rather than dropped silently. (Required hosts are already
+  // enforced by requireRenderInputs above, so this only ever skips Deno.)
+  const active = PROFILES.filter((profile) => {
+    if (hosts[profile.hostVar]) return true;
+    console.error(`notice: skipping ${profile.out} — ${profile.hostVar} is not set`);
+    return false;
+  });
+
   // Render and validate everything before writing anything: a failure on the
   // last profile must not leave the earlier ones replaced.
-  const rendered = PROFILES.map((profile) => {
+  const rendered = active.map((profile) => {
     const config = renderProfile({
       template: profile.template,
       host: hosts[profile.hostVar],

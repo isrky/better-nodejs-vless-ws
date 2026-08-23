@@ -104,6 +104,17 @@ export const FIELDS = [
     validate: (v) => (HOST_RE.test(v) ? null : 'is not a bare lowercase hostname (no scheme, port or path)')
   },
   {
+    // Optional so the Worker/Fly configs keep rendering before a Deno Deploy
+    // target exists; the -deno configs render only once this is set.
+    key: 'DENO_HOST',
+    group: 'render',
+    secret: false,
+    required: false,
+    pushTo: [],
+    help: 'hostname of the Deno Deploy deployment; used by the non-UDP configs (no UDP, like the Worker)',
+    validate: (v) => (HOST_RE.test(v) ? null : 'is not a bare lowercase hostname (no scheme, port or path)')
+  },
+  {
     key: 'INTERCEPT_CA_FILE',
     group: 'render',
     secret: false,
@@ -290,7 +301,7 @@ export function requireRenderInputs(store) {
   }
 
   const c = store.credentials;
-  return { uuid: c.UUID, wsPath: c.WSPATH, hosts: { FLY_HOST: c.FLY_HOST, WORKER_HOST: c.WORKER_HOST } };
+  return { uuid: c.UUID, wsPath: c.WSPATH, hosts: { FLY_HOST: c.FLY_HOST, WORKER_HOST: c.WORKER_HOST, DENO_HOST: c.DENO_HOST } };
 }
 
 /**

@@ -1,0 +1,12 @@
+{
+  "//": "Deno Deploy target. See src/deno/main.mjs. The import map aliases the",
+  "//2": "Cloudflare-only `cloudflare:sockets` specifier to the Deno shim so the",
+  "//3": "shared src/worker/*.mjs files are reused byte-for-byte.",
+  "imports": {
+    "cloudflare:sockets": "./src/deno/sockets.mjs"
+  },
+  "tasks": {
+    "start": "deno run --allow-net --allow-env src/deno/main.mjs",
+    "deploy": "deployctl deploy --entrypoint=src/deno/main.mjs"
+  }
+}

@@ -107,13 +107,13 @@ test('a required field refuses to be cleared, an optional one accepts it', async
 
   const withToken = cs.withField(cs.readStore(ctx.storePath), 'ADMIN_TOKEN', 'a'.repeat(44));
   cs.writeStore(ctx.storePath, withToken);
-  await drive(['6', 'c', 'q'], { storePath: ctx.storePath, store: withToken });
+  await drive(['7', 'c', 'q'], { storePath: ctx.storePath, store: withToken });
   assert.equal('ADMIN_TOKEN' in cs.readStore(ctx.storePath).credentials, false);
 });
 
 test('PROVISION_SECRET_PREVIOUS cannot be generated from the menu', async () => {
   const ctx = tmpStore();
-  const { said } = await drive(['8', 'g', 'q', 'q'], ctx);
+  const { said } = await drive(['9', 'g', 'q', 'q'], ctx);
   assert.match(said, /cannot be generated/);
 });
 
@@ -142,22 +142,22 @@ test('the CA submenu sets all three states without ever typing an empty string',
   const ctx = tmpStore();
 
   // 2 = none -> the explicit empty string
-  await drive(['5', '2', 'q'], ctx);
+  await drive(['6', '2', 'q'], ctx);
   assert.equal(cs.readStore(ctx.storePath).credentials.INTERCEPT_CA_FILE, '');
 
   // 1 = bundled -> the key is deleted, which is a different state from ''
-  await drive(['5', '1', 'q'], { storePath: ctx.storePath, store: cs.readStore(ctx.storePath) });
+  await drive(['6', '1', 'q'], { storePath: ctx.storePath, store: cs.readStore(ctx.storePath) });
   assert.equal('INTERCEPT_CA_FILE' in cs.readStore(ctx.storePath).credentials, false);
 
   // 3 = a path
-  await drive(['5', '3', 'test/fixtures/ca.pem', 'q'],
+  await drive(['6', '3', 'test/fixtures/ca.pem', 'q'],
     { storePath: ctx.storePath, store: cs.readStore(ctx.storePath) });
   assert.equal(cs.readStore(ctx.storePath).credentials.INTERCEPT_CA_FILE, 'test/fixtures/ca.pem');
 });
 
 test('the CA submenu rejects a DER path and re-prompts', async () => {
   const ctx = tmpStore();
-  const { said } = await drive(['5', '3', 'MEB_SERTIFIKASI.cer', 'q', 'q'], ctx);
+  const { said } = await drive(['6', '3', 'MEB_SERTIFIKASI.cer', 'q', 'q'], ctx);
   assert.match(said, /DER/);
 });
 

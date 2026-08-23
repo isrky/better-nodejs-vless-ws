@@ -46,10 +46,11 @@ Enhanced from [eooce/node-ws](https://github.com/eooce/node-ws) (GPL-3.0) with A
 
 ## Deployment Targets
 
-Two builds ship from this repo, sharing the VLESS protocol parser in `src/vless.js`:
+Three builds ship from this repo, sharing the VLESS protocol parser in `src/vless.js`:
 
 - **Node.js** (`appws.js`) — the full-featured self-hosted server. Everything below applies to it unless noted.
 - **Cloudflare Workers** (`src/worker/`) — a serverless build with no VPS to run. See [Cloudflare Workers](#cloudflare-workers) for its capabilities and limits.
+- **Deno Deploy** (`src/deno/`) — a second serverless build with the same capabilities and limits as the Worker (TCP + DNS-over-DoH, no UDP). It reuses the entire `src/worker/` code unchanged; only the entry (`src/deno/main.mjs`) and a `cloudflare:sockets` shim (`src/deno/sockets.mjs`) are Deno-specific. See [Deno Deploy](#deno-deploy).
 
 ---
 
@@ -268,17 +269,17 @@ Secrets survive redeployment, whereas plain-text vars are overwritten from `wran
 
 ### Feature Parity
 
-| | Node (`appws.js`) | Workers |
-|---|---|---|
-| TCP proxying | ✅ | ✅ |
-| DNS over UDP (port 53) | ✅ native | ✅ via DNS-over-HTTPS |
-| UDP to any other port | ✅ | ❌ no UDP on Workers |
-| Mux.Cool (TCP substreams) | ✅ | ✅ |
-| Multi-user / device provisioning | ✅ | ❌ single-user only |
-| xUDP / Mux UDP substreams | ✅ | ⚠️ port 53 only |
-| TLS | self-signed or reverse proxy | ✅ terminated at the edge |
-| Admin dashboard | ✅ `/admin-stats` | ❌ use the Cloudflare dashboard |
-| Destinations behind Cloudflare | ✅ | ⚠️ requires `PROXYIP` |
+| | Node (`appws.js`) | Workers | Deno Deploy |
+|---|---|---|---|
+| TCP proxying | ✅ | ✅ | ✅ |
+| DNS over UDP (port 53) | ✅ native | ✅ via DNS-over-HTTPS | ✅ via DNS-over-HTTPS |
+| UDP to any other port | ✅ | ❌ no UDP on Workers | ❌ no UDP on Deno Deploy |
+| Mux.Cool (TCP substreams) | ✅ | ✅ | ✅ |
+| Multi-user / device provisioning | ✅ | ❌ single-user only | ❌ single-user only |
+| xUDP / Mux UDP substreams | ✅ | ⚠️ port 53 only | ⚠️ port 53 only |
+| TLS | self-signed or reverse proxy | ✅ terminated at the edge | ✅ terminated at the edge |
+| Admin dashboard | ✅ `/admin-stats` | ❌ use the Cloudflare dashboard | ❌ use the Deno Deploy dashboard |
+| Destinations behind Cloudflare | ✅ | ⚠️ requires `PROXYIP` | ✅ direct dial (relay optional) |
 
 > [!IMPORTANT]
 > **Set `PROXYIP`.** A Worker cannot open a TCP connection back into Cloudflare's own edge, and a large share of the web sits behind Cloudflare. Without a relay host to retry through, those destinations simply fail to load. `PROXYIP` accepts `host` or `host:port`; when a direct dial returns nothing, the connection is retried through it.
@@ -354,14 +355,14 @@ npm run configs             # writes the four local/*.json
 xray run -c local/conf-android.json
 ```
 
-Two templates produce **four** configs, because the outputs vary along two independent axes — platform (TPROXY vs SOCKS) and UDP policy:
+Two templates produce up to **six** configs, because the outputs vary along two independent axes — platform (TPROXY vs SOCKS) and target host:
 
-| | UDP blackholed | UDP tunnelled |
-|---|---|---|
-| **Linux TPROXY** | `local/conf.json` | `local/conf-udp.json` |
-| **Android SOCKS** | `local/conf-android.json` | `local/conf-android-udp.json` |
+| | Worker (no UDP) | Fly (UDP tunnelled) | Deno Deploy (no UDP) |
+|---|---|---|---|
+| **Linux TPROXY** | `local/conf.json` | `local/conf-udp.json` | `local/conf-deno.json` |
+| **Android SOCKS** | `local/conf-android.json` | `local/conf-android-udp.json` | `local/conf-android-deno.json` |
 
-The UDP variants target the Fly build, which carries UDP; the others target the Worker, which does not. See [CREDENTIALS.md](CREDENTIALS.md) for generating and rotating the values.
+The `-udp` variants target the Fly build, which carries UDP; the rest target the serverless builds, which do not. The two `-deno` configs render only when `DENO_HOST` is set in the store (otherwise they are skipped with a notice), so adding a Deno target does not disturb the existing four. See [CREDENTIALS.md](CREDENTIALS.md) for generating and rotating the values.
 
 > [!IMPORTANT]
 > `local/*.json` are **generated**. Editing one works until the next `npm run configs` silently discards it — put durable changes in `templates/` instead, and run `npm run configs:check` (exit 2 on drift) if you are unsure whether a file is still in sync.
@@ -487,12 +488,44 @@ There is no way to code around a 12–40× shortfall. **Workers Paid is the fix*
 
 ---
 
+## Deno Deploy
+
+Deno Deploy runs the same VLESS protocol on Deno's edge, and like the Worker it is serverless with TLS terminated for you and **no UDP** — so the [feature parity](#feature-parity) and QUIC/UDP caveats above apply identically. It exists as a second serverless option: a different provider to fall back to, and one whose network can dial Cloudflare-fronted destinations directly, so `PROXYIP` is optional rather than close to mandatory.
+
+The entire `src/worker/` codebase is reused unchanged. Only two files are Deno-specific:
+
+- `src/deno/main.mjs` — the `Deno.serve` entry. It maps the Worker's `WebSocketPair` to `Deno.upgradeWebSocket`, builds the `env` object from `Deno.env`, and supplies two small shims the shared code expects: a `ctx.waitUntil` (Deno keeps the socket's promises alive on its own, so it only swallows rejections) and `caches.default` (defined once from `caches.open('doh')`, since Deno exposes the Web Cache API without the `.default` handle Cloudflare adds).
+- `src/deno/sockets.mjs` — a stand-in for `cloudflare:sockets`, wrapping `Deno.connect` to present the same `{ opened, readable, writable, close }` surface. `deno.json`'s import map aliases the `cloudflare:sockets` specifier to it, which is why `relay.mjs`/`mux.mjs` need no edits.
+
+### Deploy
+
+```bash
+# 1. Install the Deno CLI and the deployment tool
+curl -fsSL https://deno.land/install.sh | sh
+deno install -Arf jsr:@deno/deployctl
+
+# 2. Run it locally to smoke-test (reads UUID/WSPATH/etc. from the environment)
+UUID=<your-uuid> WSPATH=/<your-path> deno task start   # serves on http://localhost:8000
+
+# 3. Deploy (set env vars in the Deno Deploy dashboard: UUID, WSPATH, PROXYIP, DOH_URL)
+deno task deploy
+```
+
+`UUID` is the only credential and has **no default** — until it is set, every request gets the decoy page and nothing is proxied, exactly as on the Worker. Set `UUID`, `WSPATH`, and optionally `PROXYIP`/`DOH_URL` as environment variables in the project's settings (`DOH_URL` defaults to Cloudflare's resolver).
+
+### Client Configuration
+
+Set `DENO_HOST` in the credential store (`npm run creds`) to your Deno Deploy hostname, then `npm run configs`. Two extra configs appear — `local/conf-deno.json` (Linux TPROXY) and `local/conf-android-deno.json` (Android SOCKS) — built exactly like the Worker configs (no UDP, DNS over TCP through the relay). If `DENO_HOST` is unset, those two are skipped with a notice and the other configs render as before.
+
+---
+
 ## Project Structure
 
-Both builds share the protocol code in `src/` and split the rest into small,
+All builds share the protocol code in `src/` and split the rest into small,
 single-purpose modules. The Node build is `src/node/` (CommonJS); the Workers
-build is `src/worker/` (ESM); `src/vless.js` and `src/decoy.js` are shared by
-both.
+build is `src/worker/` (ESM); the Deno Deploy build is `src/deno/` (ESM) and
+reuses `src/worker/` wholesale, adding only a runtime entry and a
+`cloudflare:sockets` shim. `src/vless.js` and `src/decoy.js` are shared by all.
 
 ```
 appws.js              # Node entry point — requires src/node/server.js and listens
@@ -537,7 +570,11 @@ src/worker/           # Cloudflare Workers build
   config.mjs          #   env reading, cached UUID bytes
   bytes.mjs           #   base64url and length-prefix helpers
   pages.mjs           #   decoy page (re-exports src/decoy.js)
+src/deno/             # Deno Deploy build (reuses all of src/worker/)
+  main.mjs            #   Deno.serve entry: upgrade, env, ctx/cache shims, pump
+  sockets.mjs         #   cloudflare:sockets shim over Deno.connect
 test/                 # node:test suite — `npm test`, zero dependencies
+deno.json             # import map (cloudflare:sockets -> shim) + start/deploy tasks
 wrangler.toml
 README.md
 ```
