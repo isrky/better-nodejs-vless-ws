@@ -86,10 +86,10 @@ test('bare enter keeps the current value', async () => {
 
 test('an invalid value re-prompts the same field instead of aborting', async () => {
   const ctx = tmpStore();
-  const { said, remaining } = await drive(['3', 'https://nope.example', 'good.example.dev', 'q'], ctx);
+  const { said, remaining } = await drive(['3', 'nope.example:443', 'good.example.dev', 'q'], ctx);
 
   assert.equal(remaining, 0, 'the session must survive a bad entry');
-  assert.match(said, /not a bare lowercase hostname/);
+  assert.match(said, /not a valid hostname/);
   assert.equal(cs.readStore(ctx.storePath).credentials.FLY_HOST, 'good.example.dev');
 });
 
@@ -282,6 +282,34 @@ test('the reveal is gated: n prints nothing, y prints the values', async () => {
 
   const yes = await drive(['p', 'y', 'q'], ctx);
   assert.ok(yes.said.includes(ctx.store.credentials.UUID), 'answering y must print the value');
+});
+
+test('e exports a 0600 deno.env with only the deno vars and prints no secret', async () => {
+  const ctx = tmpStore();
+  const { said } = await drive(['e', 'q'], ctx);
+
+  const envPath = path.join(path.dirname(ctx.storePath), 'deno.env');
+  assert.ok(fs.existsSync(envPath), 'deno.env is written');
+  assert.equal((fs.statSync(envPath).mode & 0o777).toString(8), '600', 'mode is 0600');
+
+  const text = fs.readFileSync(envPath, 'utf8');
+  assert.match(text, /^UUID=00000000-0000-4000-8000-000000000001$/m);
+  assert.match(text, /^WSPATH=\/test-ws-path$/m);
+  assert.ok(!text.includes('FLY_HOST'), 'only the deno vars are exported');
+
+  // The menu announces the path and key names but never the secret itself.
+  assert.ok(!said.includes(ctx.store.credentials.UUID), 'no secret printed to the terminal');
+  assert.match(said, /wrote .*deno\.env \(UUID, WSPATH\)/);
+});
+
+test('e reports nothing to export when no deno vars are set', async () => {
+  const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'creds-')), 'credentials.json');
+  const store = cs.emptyStore();
+  cs.writeStore(p, store);
+
+  const { said } = await drive(['e', 'q'], { storePath: p, store });
+  assert.match(said, /nothing to export/);
+  assert.ok(!fs.existsSync(path.join(path.dirname(p), 'deno.env')), 'no file is written');
 });
 
 test('the platform names come from the committed config, and degrade when absent', () => {

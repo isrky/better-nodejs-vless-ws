@@ -22,7 +22,8 @@ import {
   FIELDS, DEFAULT_STORE_PATH, StoreError,
   emptyStore, readStore, writeStore, restoreBackup, storeMode, withField,
   redact, generate, validateField, validateStore, field,
-  parseLegacyEnv, planImport, pushPlan, publicHostWarnings, platformNames
+  parseLegacyEnv, planImport, pushPlan, publicHostWarnings, platformNames,
+  serializeEnv, writeEnvFile
 } from './credstore.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -33,6 +34,7 @@ const USAGE = `manage the credentials in local/credentials.json
   npm run creds                    interactive menu
   npm run creds:status             redacted report (never prompts)
   npm run creds:push               show the secrets, grouped by dashboard
+  npm run creds:env                write local/deno.env for Deno Deploy import
   node tools/credentials.mjs --push --yes
                                    skip the confirmation (prints secrets)
   node tools/credentials.mjs --import PATH
@@ -87,14 +89,15 @@ export function renderMenu(store, storePath = DEFAULT_STORE_PATH) {
 
   lines.push('');
   lines.push('   r  render the configs      p  reveal secrets to paste');
-  lines.push('   u  undo last change        q  quit');
+  lines.push('   e  export .env for Deno    u  undo last change');
+  lines.push('   q  quit');
   lines.push('');
   return lines.join('\n');
 }
 
 export function statusReport(store, storePath = DEFAULT_STORE_PATH) {
   const problems = validateStore(store);
-  const lines = [renderMenu(store, storePath).replace(/\n\s{3}[rupq] .*/g, '')];
+  const lines = [renderMenu(store, storePath).replace(/\n\s{3}[rupqe] .*/g, '')];
 
   for (const warning of publicHostWarnings(store)) lines.push(`warning: ${warning}`);
   if (problems.length) {
@@ -320,6 +323,30 @@ export async function revealWithConfirmation(store, ask, out) {
   return true;
 }
 
+/**
+ * Write the Deno-Deploy env vars to a 0600 `deno.env` next to the store, for the
+ * dashboard's bulk `.env` import.
+ *
+ * Unlike the reveal, this writes to a file rather than the terminal, so it never
+ * prints a secret — it announces the path and the key names only, which is why
+ * it needs no confirmation and is safe off a TTY. The file lives in the same
+ * gitignored dir the rendered configs already do, so it is not a new leak class.
+ *
+ * @returns the path written, or null when nothing is set.
+ */
+export function exportDenoEnv(store, storePath, out) {
+  const keys = pushPlan(store).deno;
+  if (!keys.length) {
+    out('  nothing to export — set UUID and WSPATH first');
+    return null;
+  }
+  const path = resolve(dirname(storePath), 'deno.env');
+  writeEnvFile(path, serializeEnv(store, keys));
+  out(`  wrote ${path.replace(ROOT + '/', '')} (${keys.join(', ')})`);
+  out(dim('  upload it in the Deno Deploy dashboard, or paste its contents into the env import'));
+  return path;
+}
+
 // ==========================================
 // The menu loop
 // ==========================================
@@ -351,6 +378,14 @@ export async function runMenu({ storePath, store, ask, out, render }) {
     }
     if (choice === 'r') {
       if (render) await render(store);
+      continue;
+    }
+    if (choice === 'e') {
+      try {
+        exportDenoEnv(store, storePath, out);
+      } catch (e) {
+        out(red(`  ${e.message}`));
+      }
       continue;
     }
     if (choice === 'u') {
@@ -456,6 +491,13 @@ async function main(argv) {
     } finally {
       rl.close();
     }
+  }
+
+  if (argv.includes('--deno-env')) {
+    // Writes a file, never prints a secret, so it is safe off a TTY.
+    const store = loadStoreOrEmpty(storePath);
+    const path = exportDenoEnv(store, storePath, (s) => console.log(s));
+    return path ? 0 : 1;
   }
 
   if (argv.includes('--import')) {

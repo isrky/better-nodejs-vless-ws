@@ -97,7 +97,12 @@ test('validateField catches the failures that would otherwise be silent', () => 
   assert.match(cs.validateField('UUID', '00000000-0000-4000-8000-00000000000A'), /lowercase/);
 
   assert.equal(cs.validateField('FLY_HOST', 'edge.example.dev'), null);
-  for (const bad of ['https://edge.example.dev', 'edge.example.dev:443', 'EDGE.example.dev', 'edge']) {
+  // A pasted dashboard URL and stray case are normalised away, so they validate.
+  for (const ok of ['https://edge.example.dev', 'https://edge.example.dev/', 'EDGE.example.dev']) {
+    assert.equal(cs.validateField('FLY_HOST', ok), null, `${ok} must be accepted`);
+  }
+  // A port is not stripped — dropping it would silently change the target.
+  for (const bad of ['edge.example.dev:443', 'https://edge.example.dev:443', 'edge']) {
     assert.ok(cs.validateField('FLY_HOST', bad), `${bad} must be rejected`);
   }
 
@@ -194,6 +199,11 @@ test('withField deletes on null rather than writing an empty string', () => {
 
   const cleared = cs.withField(s, 'INTERCEPT_CA_FILE', null);
   assert.equal('INTERCEPT_CA_FILE' in cleared.credentials, false);
+});
+
+test('withField stores a host stripped of scheme, path and case', () => {
+  const s = cs.withField(fullStore(), 'DENO_HOST', 'https://App.Example.Deno.NET/');
+  assert.equal(s.credentials.DENO_HOST, 'app.example.deno.net');
 });
 
 // ---------- I/O ----------
@@ -310,6 +320,7 @@ test('the push plan routes each key to the right place and carries no values', (
   const plan = cs.pushPlan(s);
   assert.deepEqual(plan.fly.sort(), ['ADMIN_TOKEN', 'PROVISION_SECRET', 'USERS', 'UUID', 'WSPATH']);
   assert.deepEqual(plan.wrangler.sort(), ['PROXYIP', 'UUID', 'WSPATH']);
+  assert.deepEqual(plan.deno.sort(), ['PROXYIP', 'UUID', 'WSPATH']);
   assert.deepEqual(plan.renderOnly.sort(), ['FLY_HOST', 'WORKER_HOST']);
 
   // No SECRET value may appear. Hostnames legitimately do — the PUBLIC_HOST
@@ -324,6 +335,24 @@ test('the push plan routes each key to the right place and carries no values', (
 
 test('unset keys are not pushed', () => {
   assert.deepEqual(cs.pushPlan(fullStore()).fly.sort(), ['UUID', 'WSPATH']);
+});
+
+test('serializeEnv emits KEY=value for set keys and skips unset ones', () => {
+  const s = cs.emptyStore();
+  s.credentials.UUID = '00000000-0000-4000-8000-000000000001';
+  s.credentials.WSPATH = '/w';
+  // PROXYIP deliberately left unset
+  assert.equal(
+    cs.serializeEnv(s, ['UUID', 'WSPATH', 'PROXYIP']),
+    'UUID=00000000-0000-4000-8000-000000000001\nWSPATH=/w\n'
+  );
+  assert.equal(cs.serializeEnv(s, ['PROXYIP']), '', 'no set keys yields empty output');
+});
+
+test('serializeEnv single-quotes a value containing whitespace', () => {
+  const s = cs.emptyStore();
+  s.credentials.USERS = 'alice bob';
+  assert.equal(cs.serializeEnv(s, ['USERS']), "USERS='alice bob'\n");
 });
 
 // ---------- redaction ----------

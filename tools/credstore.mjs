@@ -30,6 +30,22 @@ const PUBLISHED_UUID = '7bd180e8-1142-4387-93f5-03e8d750a896';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 
+// The render/config fields want a bare hostname, but the value people have to
+// hand is the dashboard URL — `https://app.example.dev/`. Strip the scheme,
+// any path, a trailing dot, and case so a pasted URL just works. A `:port` is
+// deliberately NOT stripped: dropping it would silently change where traffic
+// goes, so it stays a validation error rather than a quiet fix.
+const normaliseHost = (v) => String(v)
+  .trim()
+  .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')  // scheme://
+  .replace(/\/.*$/, '')                       // path / query / fragment
+  .replace(/\.$/, '')                         // trailing dot
+  .toLowerCase();
+
+const validateHost = (v) => (HOST_RE.test(normaliseHost(v))
+  ? null
+  : 'is not a valid hostname (scheme and path are removed automatically; a :port is not allowed)');
+
 export class StoreError extends Error {}
 
 function fail(msg) {
@@ -61,7 +77,7 @@ export const FIELDS = [
     group: 'render',
     secret: true,
     required: true,
-    pushTo: ['fly', 'wrangler'],
+    pushTo: ['fly', 'wrangler', 'deno'],
     help: 'the tunnel credential; both deployments and every client config need it',
     generate: () => randomUUID(),
     validate: (v) => {
@@ -75,7 +91,7 @@ export const FIELDS = [
     group: 'render',
     secret: true,
     required: true,
-    pushTo: ['fly', 'wrangler'],
+    pushTo: ['fly', 'wrangler', 'deno'],
     help: 'the WebSocket path; obscurity only — the UUID is the credential',
     generate: () => '/' + randomBytes(16).toString('hex'),
     validate: (v) => {
@@ -92,7 +108,8 @@ export const FIELDS = [
     required: true,
     pushTo: [],
     help: 'hostname of the Fly deployment; used by the UDP-capable configs',
-    validate: (v) => (HOST_RE.test(v) ? null : 'is not a bare lowercase hostname (no scheme, port or path)')
+    normalise: normaliseHost,
+    validate: validateHost
   },
   {
     key: 'WORKER_HOST',
@@ -101,7 +118,8 @@ export const FIELDS = [
     required: true,
     pushTo: [],
     help: 'hostname of the Cloudflare Worker; used by the non-UDP configs',
-    validate: (v) => (HOST_RE.test(v) ? null : 'is not a bare lowercase hostname (no scheme, port or path)')
+    normalise: normaliseHost,
+    validate: validateHost
   },
   {
     // Optional so the Worker/Fly configs keep rendering before a Deno Deploy
@@ -112,7 +130,8 @@ export const FIELDS = [
     required: false,
     pushTo: [],
     help: 'hostname of the Deno Deploy deployment; used by the non-UDP configs (no UDP, like the Worker)',
-    validate: (v) => (HOST_RE.test(v) ? null : 'is not a bare lowercase hostname (no scheme, port or path)')
+    normalise: normaliseHost,
+    validate: validateHost
   },
   {
     key: 'INTERCEPT_CA_FILE',
@@ -199,8 +218,8 @@ export const FIELDS = [
     group: 'server',
     secret: false,
     required: false,
-    pushTo: ['wrangler'],
-    help: 'relay host the Worker falls back to for Cloudflare-hosted origins',
+    pushTo: ['wrangler', 'deno'],
+    help: 'relay host the Worker falls back to for Cloudflare-hosted origins (optional on Deno)',
     validate: (v) => {
       if (v.trim() === '') return 'is empty';
       if (/\s/.test(v)) return 'must not contain whitespace';
@@ -522,7 +541,57 @@ export function pushPlan(store) {
     .filter((f) => f.pushTo.length === 0 && store.credentials[f.key] !== undefined)
     .map((f) => f.key);
 
-  return { fly: set('fly'), wrangler: set('wrangler'), renderOnly, warnings: publicHostWarnings(store) };
+  return {
+    fly: set('fly'),
+    wrangler: set('wrangler'),
+    deno: set('deno'),
+    renderOnly,
+    warnings: publicHostWarnings(store)
+  };
+}
+
+/**
+ * Serialise selected credentials as dotenv `KEY=value` lines, for a dashboard
+ * that imports a whole `.env` at once (Deno Deploy). Unset keys are skipped.
+ *
+ * Managed values are URL-safe by validation (no whitespace or `#`), so they need
+ * no quoting; a value that somehow contains either is single-quoted defensively
+ * so a hand-entered oddity round-trips rather than truncating at the `#`.
+ */
+export function serializeEnv(store, keys) {
+  const out = [];
+  for (const key of keys) {
+    const value = store.credentials[key];
+    if (value === undefined || value === null) continue;
+    out.push(`${key}=${/[\s#]/.test(value) ? `'${value}'` : value}`);
+  }
+  return out.length ? out.join('\n') + '\n' : '';
+}
+
+/**
+ * Write text to a 0600 file, atomically. Mirrors writeStore's durability
+ * (tmp + fsync + rename + read-back) but keeps no `.bak`: unlike the store, an
+ * exported env file is regenerable from it.
+ */
+export function writeEnvFile(path, text) {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const tmp = path + '.tmp';
+  let fd;
+  try {
+    fd = openSync(tmp, 'w', 0o600);
+    writeSync(fd, text);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(tmp, path);
+  } catch (e) {
+    if (fd !== undefined) closeSync(fd);
+    if (existsSync(tmp)) unlinkSync(tmp);
+    throw e;
+  }
+  if (readFileSync(path, 'utf8') !== text) {
+    fail(`${path} did not read back identically`);
+  }
 }
 
 /**

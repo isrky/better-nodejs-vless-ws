@@ -11,6 +11,7 @@
     "creds": "node tools/credentials.mjs",
     "creds:status": "node tools/credentials.mjs --status",
     "creds:push": "node tools/credentials.mjs --push",
+    "creds:env": "node tools/credentials.mjs --deno-env",
     "test": "node --test",
     "test:watch": "node --test --watch",
     "dev": "wrangler dev --remote",

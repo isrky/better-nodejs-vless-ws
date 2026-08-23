@@ -513,6 +513,8 @@ deno task deploy
 
 `UUID` is the only credential and has **no default** — until it is set, every request gets the decoy page and nothing is proxied, exactly as on the Worker. Set `UUID`, `WSPATH`, and optionally `PROXYIP`/`DOH_URL` as environment variables in the project's settings (`DOH_URL` defaults to Cloudflare's resolver).
 
+To set them in one step instead of typing each by hand, run **`npm run creds:env`** (or press `e` in `npm run creds`). It writes `local/deno.env` — a `KEY=value` file holding `UUID`, `WSPATH`, and `PROXYIP` (whichever are set) — which you upload, or paste, into the Deno Deploy dashboard's environment-variable import. The file is `0600` and lives in the gitignored `local/` dir; it prints only the path, never the secrets.
+
 ### Client Configuration
 
 Set `DENO_HOST` in the credential store (`npm run creds`) to your Deno Deploy hostname, then `npm run configs`. Two extra configs appear — `local/conf-deno.json` (Linux TPROXY) and `local/conf-android-deno.json` (Android SOCKS) — built exactly like the Worker configs (no UDP, DNS over TCP through the relay). If `DENO_HOST` is unset, those two are skipped with a notice and the other configs render as before.
