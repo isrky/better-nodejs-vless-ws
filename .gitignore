@@ -9,3 +9,6 @@ local/
 # The interception CA is public, but it is DER and nothing reads it at
 # runtime — src/node/interceptca.js carries the PEM the builds actually use.
 *.cer
+
+# Third-party MEB network analysis (arinc9, public research) — not ours to redistribute.
+restrictions/
