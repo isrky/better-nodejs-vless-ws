@@ -70,6 +70,16 @@ const INVITE_GRACE_MS = 5 * 60 * 1000;
 // Only ever used to name a downloaded file and to label a profile.
 const SAFE_LABEL = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
+// The operator's per-invite toggles, encoded as a query string that has to ride
+// unchanged across every hop (landing -> show -> conf.json). Dropping one at any
+// hop silently serves a different variant than the operator chose.
+function toggleQs(udp, front) {
+  const parts = [];
+  if (udp) parts.push('udp=1');
+  if (front) parts.push('front=1');
+  return parts.length ? '?' + parts.join('&') : '';
+}
+
 // One snapshot per second. The uptime counter advancing is also the cheapest
 // possible "this page is live" signal, and 1 Hz is far inside every proxy idle
 // timeout worth worrying about (Fly's is ~60s). If this is ever raised past
@@ -249,7 +259,10 @@ class Session {
     // with no log line. server.js warns at boot if the two can collide.
     if (!upgrading && this.config.provisioning &&
         req.basePath.startsWith(this.config.invitePath)) {
-      return this.#serveInvite(req);
+      // #serveInvite is async (it may await the front-cert probe); it drives the
+      // response itself, so the promise is fire-and-forget — but a rejection
+      // must never go unhandled, hence the catch.
+      return this.#serveInvite(req).catch(() => this.destroy('Invite handler error'));
     }
 
     if (req.method !== 'GET' || !upgrading) {
@@ -446,6 +459,9 @@ class Session {
     // Operator-side only. The invitee never chooses — a second download button
     // on their page is what silently cost them Roblox and Discord voice.
     const udp = params.get('udp') === '1';
+    // Fronting is only offered when FRONT_SNI is configured; otherwise the
+    // toggle is inert and the standard config is served.
+    const front = params.get('front') === '1' && Boolean(this.config.frontSni);
 
     let minted = null;
     const user = label ? this.config.registry.mintable(label) : null;
@@ -462,7 +478,8 @@ class Session {
       minted = {
         label: user.label,
         udp,
-        url: this.#inviteUrl(req, token, '', udp ? '?udp=1' : ''),
+        front,
+        url: this.#inviteUrl(req, token, '', toggleQs(udp, front)),
         expiresAt: new Date(exp * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC'
       };
       this.log('PROVISION', `Invite minted for ${user.label}, expires ${minted.expiresAt}`);
@@ -473,6 +490,7 @@ class Session {
       labels: this.config.registry.labels,
       minted,
       publicHost: this.config.publicHost,
+      fronting: Boolean(this.config.frontSni),
       adminPath: ADMIN_PROVISION_PATH
     }));
     this.destroy('Provision page served');
@@ -486,7 +504,7 @@ class Session {
    * is merely expired gets a real page, because the signature proves the
    * operator minted it and telling that holder discloses nothing new.
    */
-  #serveInvite(req) {
+  async #serveInvite(req) {
     const limits = this.deps.limits;
     if (limits) {
       const ip = clientIp(req, this.#client, this.config);
@@ -520,8 +538,12 @@ class Session {
     if (!result.ok) return stale();
 
     // Carried across every hop: landing -> show -> conf.json. Dropping it at
-    // any one of them silently serves the other policy.
-    const qs = new URLSearchParams(req.query || '').get('udp') === '1' ? '?udp=1' : '';
+    // any one of them silently serves a different variant. `front` is honoured
+    // only when FRONT_SNI is configured.
+    const toggles = new URLSearchParams(req.query || '');
+    const wantUdp = toggles.get('udp') === '1';
+    const wantFront = toggles.get('front') === '1' && Boolean(this.config.frontSni);
+    const qs = toggleQs(wantUdp, wantFront);
 
     // The landing page burns nothing: chat clients fetch a pasted URL to build
     // a preview, and burning here would kill the invite before the human taps.
@@ -544,7 +566,6 @@ class Session {
     const host = this.#publicHost(req);
     if (!host) return stale();
 
-    const params = new URLSearchParams(req.query || '');
     const profile = {
       uuid: user.uuid,
       host,
@@ -553,20 +574,35 @@ class Session {
       // Default carries UDP but refuses QUIC: games and voice chat work, while
       // browsers stay on TCP/TLS. ?udp=1 is an unadvertised escape hatch for
       // anyone who wants QUIC tunnelled too.
-      udpPolicy: params.get('udp') === '1' ? 'all' : 'noquic'
+      udpPolicy: wantUdp ? 'all' : 'noquic'
     };
+
+    // Fronting needs the pin of the cert the edge serves for the spoofed SNI.
+    // The probe never throws (the cache swallows failures); a null pin means the
+    // edge was unreachable, so we fall back to the standard config rather than
+    // hand out one that cannot connect.
+    let frontSni = null;
+    let pinnedSha256 = null;
+    if (wantFront && this.deps.frontPin) {
+      const pin = await this.deps.frontPin.get();
+      if (pin) { frontSni = this.config.frontSni; pinnedSha256 = pin; }
+    }
+    const fronted = Boolean(frontSni && pinnedSha256);
 
     // Built once and shared: the reveal page's copy button and the download
     // must hand over identical bytes. Two build sites that could drift is the
     // failure this area keeps producing.
     const configJson = JSON.stringify(buildXrayConfig({
       ...profile,
-      ca: this.config.interceptCa ? this.config.interceptCa.split('\\n') : null
+      ca: this.config.interceptCa ? this.config.interceptCa.split('\\n') : null,
+      frontSni,
+      pinnedSha256
     }), null, 2);
 
     if (action === '/conf.json') {
-      const name = `vless-${user.label}${profile.udpPolicy === 'all' ? '-udp' : ''}.json`;
-      this.log('PROVISION', `Config downloaded for ${user.label}`);
+      const name = `vless-${user.label}` +
+        `${profile.udpPolicy === 'all' ? '-udp' : ''}${fronted ? '-fronted' : ''}.json`;
+      this.log('PROVISION', `Config downloaded for ${user.label}${fronted ? ' (fronted)' : ''}`);
       sendHttpResponse(this.#client, 200, JSON_TYPE, configJson, [
         `Content-Disposition: attachment; filename="${name}"`,
         'Referrer-Policy: no-referrer'
@@ -574,11 +610,14 @@ class Session {
       return this.destroy('Invite config served');
     }
 
-    this.log('PROVISION', `Invite revealed for ${user.label}`);
+    this.log('PROVISION', `Invite revealed for ${user.label}${fronted ? ' (fronted)' : ''}`);
     sendHttpResponse(this.#client, 200, HTML, renderRevealPage({
       label: user.label,
       confUrl: this.config.invitePath + token + '/conf.json' + qs,
-      configJson
+      configJson,
+      // Only surfaced when the operator asked to front but the edge probe failed,
+      // so the invitee knows they got the standard profile, not the fronted one.
+      fallbackNote: wantFront && !fronted
     }), ['Referrer-Policy: no-referrer']);
     this.destroy('Invite revealed');
   }

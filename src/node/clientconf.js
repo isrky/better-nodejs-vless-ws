@@ -45,8 +45,16 @@ const { INTERCEPT_CA_PEM } = require('./interceptca.js');
  * So 'noquic' is the default because it matches common practice and is the
  * safer starting point, not because the tradeoff is settled. Mint an invite
  * with ?udp=1 to compare the two on a real device.
+ *
+ * Domain fronting: when `frontSni` and `pinnedSha256` are both given, the TLS
+ * serverName becomes the spoofed (allowed) domain and the cert is authenticated
+ * by pinned SHA-256 instead of the CA — so a network that filters on SNI waves
+ * it through, while `address`/`wsSettings.host` stay the real backend that the
+ * operator's nginx routes on. Both must be present; otherwise the normal
+ * serverName+certificates shape is used.
  */
-function buildXrayConfig({ uuid, host, port = 443, wsPath = '/', udpPolicy = 'noquic', ca = null }) {
+function buildXrayConfig({ uuid, host, port = 443, wsPath = '/', udpPolicy = 'noquic', ca = null,
+                          frontSni = null, pinnedSha256 = null }) {
   const pem = ca === null ? INTERCEPT_CA_PEM : ca;
   const udp = udpPolicy === 'noquic' || udpPolicy === 'all';
 
@@ -60,9 +68,15 @@ function buildXrayConfig({ uuid, host, port = 443, wsPath = '/', udpPolicy = 'no
   }
   rules.push({ network: 'udp', outboundTag: udp ? 'vless' : 'block' });
 
-  const tlsSettings = { serverName: host };
-  if (pem && pem.length > 0) {
-    tlsSettings.certificates = [{ usage: 'verify', certificate: pem.slice() }];
+  let tlsSettings;
+  if (frontSni && pinnedSha256) {
+    // Spoofed SNI, cert pinned by fingerprint rather than verified by name.
+    tlsSettings = { serverName: frontSni, pinnedPeerCertSha256: pinnedSha256 };
+  } else {
+    tlsSettings = { serverName: host };
+    if (pem && pem.length > 0) {
+      tlsSettings.certificates = [{ usage: 'verify', certificate: pem.slice() }];
+    }
   }
 
   return {

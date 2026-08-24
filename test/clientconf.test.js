@@ -124,6 +124,30 @@ test('the config serialises to valid JSON with no forbidden fields', () => {
   assert.ok(!json.includes('pinnedPeerCertSha256'));
 });
 
+test('a fronted config spoofs the SNI and pins the cert instead of the CA', () => {
+  const pin = 'a'.repeat(64);
+  const conf = buildXrayConfig({ ...ARGS, frontSni: 'chatgpt.com', pinnedSha256: pin });
+  const out = conf.outbounds[0];
+  const tls = out.streamSettings.tlsSettings;
+
+  assert.equal(tls.serverName, 'chatgpt.com', 'SNI is the spoofed domain');
+  assert.equal(tls.pinnedPeerCertSha256, pin);
+  assert.equal(tls.certificates, undefined, 'no CA verify block when pinning');
+  // Only the SNI lies — the tunnel still dials and Host-routes to the real host.
+  assert.equal(out.settings.vnext[0].address, ARGS.host);
+  assert.equal(out.streamSettings.wsSettings.host, ARGS.host);
+});
+
+test('fronting needs BOTH sni and pin, else it falls back to the normal shape', () => {
+  const onlySni = buildXrayConfig({ ...ARGS, frontSni: 'chatgpt.com' });
+  assert.equal(onlySni.outbounds[0].streamSettings.tlsSettings.serverName, ARGS.host);
+  assert.ok(onlySni.outbounds[0].streamSettings.tlsSettings.certificates);
+
+  const onlyPin = buildXrayConfig({ ...ARGS, pinnedSha256: 'a'.repeat(64) });
+  assert.equal(onlyPin.outbounds[0].streamSettings.tlsSettings.serverName, ARGS.host);
+  assert.equal(onlyPin.outbounds[0].streamSettings.tlsSettings.pinnedPeerCertSha256, undefined);
+});
+
 test('the baked CA is the fatihca root and is well-formed PEM', () => {
   assert.equal(INTERCEPT_CA_PEM[0], '-----BEGIN CERTIFICATE-----');
   assert.equal(INTERCEPT_CA_PEM[INTERCEPT_CA_PEM.length - 1], '-----END CERTIFICATE-----');

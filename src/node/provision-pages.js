@@ -164,7 +164,7 @@ function qrBlock(text) {
 // Operator side
 // ==========================================
 
-function renderProvisionPage({ labels, minted = null, publicHost = '', adminPath, nav = '' }) {
+function renderProvisionPage({ labels, minted = null, publicHost = '', fronting = false, adminPath, nav = '' }) {
   const options = labels.length === 0
     ? '<option value="" disabled selected>No users configured</option>'
     : labels.map((l) => `<option value="${escapeHtml(l)}">${escapeHtml(l)}</option>`).join('\n                ');
@@ -181,8 +181,8 @@ function renderProvisionPage({ labels, minted = null, publicHost = '', adminPath
             <hgroup>
                 <h2>Invite for ${escapeHtml(minted.label)}</h2>
                 <p>Expires ${escapeHtml(minted.expiresAt)} &mdash; scan or send it before then.</p>
-                <p><small>UDP policy: <strong>${minted.udp ? 'QUIC tunnelled too' : 'QUIC blocked (default)'}</strong>
-                &mdash; downloads as <code>vless-${escapeHtml(minted.label)}${minted.udp ? '-udp' : ''}.json</code></small></p>
+                <p><small>UDP policy: <strong>${minted.udp ? 'QUIC tunnelled too' : 'QUIC blocked (default)'}</strong>${minted.front ? ' &middot; <strong>domain-fronted SNI</strong>' : ''}
+                &mdash; downloads as <code>vless-${escapeHtml(minted.label)}${minted.udp ? '-udp' : ''}${minted.front ? '-fronted' : ''}.json</code></small></p>
             </hgroup>
 ${qrBlock(minted.url)}
             <p class="warn"><small>Anyone who opens this link before it expires gets
@@ -213,7 +213,14 @@ ${hostWarning}
             </label>
             <small>For comparing. The default blocks QUIC so browsers stay on
             TCP/TLS; ordinary UDP &mdash; games, voice chat &mdash; is tunnelled
-            either way.</small>
+            either way.</small>${fronting ? `
+            <label for="front">
+                <input type="checkbox" id="front" name="front" value="1">
+                Domain-front the SNI
+            </label>
+            <small>Sends an allowed domain as the TLS SNI and pins the real
+            certificate &mdash; a fallback for when the real hostname gets
+            filtered. Only for networks that block on SNI.</small>` : ''}
             <button type="submit"${labels.length === 0 ? ' disabled' : ''}>Create invite</button>
         </form>
 ${emptyNote}
@@ -245,7 +252,13 @@ function renderInvitePage({ showUrl }) {
 }
 
 /** The reveal page: this is the one that actually hands over a credential. */
-function renderRevealPage({ label, confUrl, configJson }) {
+function renderRevealPage({ label, confUrl, configJson, fallbackNote = false }) {
+  const fallback = fallbackNote ? `
+        <article class="warn">
+            <strong>Fronting unavailable.</strong> The edge could not be reached to
+            pin its certificate, so this is the standard profile, not the
+            domain-fronted one. Try again in a moment if you need fronting.
+        </article>` : '';
   return page({
     title: 'Your connection',
     copy: true,
@@ -253,6 +266,7 @@ function renderRevealPage({ label, confUrl, configJson }) {
             <h1>Set up ${escapeHtml(label)}</h1>
             <p>Install a client first &mdash; v2rayNG, Streisand, Hiddify or NekoBox.</p>
         </hgroup>
+${fallback}
 
         <article>
             <h2>Your configuration</h2>

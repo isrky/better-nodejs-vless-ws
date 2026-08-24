@@ -192,6 +192,22 @@ Setting `VPS_HOST` in `npm run creds` also makes `npm run configs` render UDP-ca
 
 ---
 
+## Domain fronting (when your SNI gets blocked)
+
+Some networks filter HTTPS on the **SNI** in the TLS handshake and never cross-check it against the inner `Host` header. Because your VPS nginx routes by `Host`, you can send an **allowed** domain as the TLS SNI while the tunnel still reaches your real backend — so when `sync.isrky.dev` gets flagged, a fronted config keeps working without moving the server.
+
+Set **`FRONT_SNI`** in `npm run creds` to an allowed, high-reputation domain (e.g. `www.microsoft.com`, `chatgpt.com`). It must be a domain the network *allows* — this defeats an SNI blocklist, not an allowlist of a few big sites, so pick one those lists would never drop. Then:
+
+- **Local files:** `npm run configs` renders `local/conf-vps-fronted.json` and `local/conf-android-vps-fronted.json`. The TLS `serverName` is the spoofed domain; `address` and the WS `Host` stay your real host; the cert is authenticated by **`pinnedPeerCertSha256`** (xray's replacement for the deprecated `allowInsecure`), which is **probed live** from your public edge at render time — no manual fingerprinting.
+- **Provisioned devices:** with `FRONT_SNI` in the container's `.env` (it flows there via `npm run creds:docker`), the operator can tick **Domain-front the SNI** when minting an invite, or append `?front=1`. The server self-probes its own edge for the pin and caches it; if the probe fails it serves the standard profile and says so.
+
+Two caveats:
+
+- **The pin is of the leaf cert your edge serves for the spoofed SNI** (nginx's `default_server` cert). Let's Encrypt rotates it about every 60 days — the local files re-probe on every `npm run configs`, and the server re-probes on its own, but if you ever pin manually, refresh it after each renewal.
+- Fronting sets `pinnedPeerCertSha256`, which still cryptographically verifies you're reaching *your* server — it only stops verifying the (spoofed) hostname. It is Node/VPS-only; the Worker and Deno targets can't front to your backend.
+
+---
+
 ## Admin Dashboard
 
 A live stats page is available at:

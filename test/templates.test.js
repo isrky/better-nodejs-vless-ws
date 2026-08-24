@@ -171,6 +171,24 @@ test('the CA splices in as separate lines, and an empty CA drops the block', () 
   assert.equal(without.outbounds[0].streamSettings.tlsSettings.serverName, FIXTURE.host);
 });
 
+test('a fronted render spoofs the SNI and pins the cert, keeping host/address real', () => {
+  const pin = 'b'.repeat(64);
+  for (const template of templateFiles()) {
+    const out = renderer.renderProfile({
+      template, host: FIXTURE.host, udpPolicy: 'all',
+      uuid: FIXTURE.uuid, wsPath: FIXTURE.wsPath, caLines: INTERCEPT_CA_PEM,
+      front: { sni: 'www.microsoft.com', pin }
+    }).outbounds[0];
+    const tls = out.streamSettings.tlsSettings;
+
+    assert.equal(tls.serverName, 'www.microsoft.com');
+    assert.equal(tls.pinnedPeerCertSha256, pin);
+    assert.equal('certificates' in tls, false, 'fronting drops the CA block');
+    assert.equal(out.settings.vnext[0].address, FIXTURE.host, 'address stays real');
+    assert.equal(out.streamSettings.wsSettings.host, FIXTURE.host, 'Host header stays real');
+  }
+});
+
 test('the three host fields always agree', () => {
   // A mismatch is a Cloudflare 403 with no upgrade, which reads as a network
   // fault rather than a config error.
@@ -209,14 +227,16 @@ test('normaliseWsPath yields exactly one leading slash', () => {
 
 test('the profile table covers both templates and both udp modes', () => {
   const { PROFILES } = renderer;
-  assert.equal(PROFILES.length, 8);
-  assert.equal(new Set(PROFILES.map((p) => p.out)).size, 8, 'no duplicate outputs');
-  assert.equal(PROFILES.filter((p) => p.udp).length, 4);
+  assert.equal(PROFILES.length, 10);
+  assert.equal(new Set(PROFILES.map((p) => p.out)).size, 10, 'no duplicate outputs');
+  assert.equal(PROFILES.filter((p) => p.udp).length, 6);
+  assert.equal(PROFILES.filter((p) => p.front).length, 2, 'two domain-fronted variants');
 
   for (const p of PROFILES) {
     assert.ok(templateFiles().includes(p.template), `${p.out}: unknown template ${p.template}`);
     assert.ok(['FLY_HOST', 'WORKER_HOST', 'DENO_HOST', 'VPS_HOST'].includes(p.hostVar));
     assert.ok(p.out.startsWith('local/'));
+    if (p.front) assert.equal(p.hostVar, 'VPS_HOST', `${p.out}: fronting is VPS-only`);
   }
 
   // tools/qr.mjs hardcodes this exact path as its default and embeds the bare

@@ -106,6 +106,11 @@ test('validateField catches the failures that would otherwise be silent', () => 
     assert.ok(cs.validateField('FLY_HOST', bad), `${bad} must be rejected`);
   }
 
+  // FRONT_SNI is a plain hostname like the deployment hosts.
+  assert.equal(cs.validateField('FRONT_SNI', 'www.microsoft.com'), null);
+  assert.equal(cs.validateField('FRONT_SNI', 'HTTPS://ChatGPT.com/'), null, 'normalised then validated');
+  assert.ok(cs.validateField('FRONT_SNI', 'chatgpt.com:443'), 'a port is rejected');
+
   assert.equal(cs.validateField('WSPATH', '/abc'), null);
   assert.ok(cs.validateField('WSPATH', 'abc'), 'must start with /');
   assert.ok(cs.validateField('WSPATH', '/a b'));
@@ -314,14 +319,16 @@ test('the push plan routes each key to the right place and carries no values', (
     ADMIN_TOKEN: 'a'.repeat(44),
     PROVISION_SECRET: 'b'.repeat(44),
     USERS: 'alice bob',
-    PROXYIP: '203.0.113.5:8443'
+    PROXYIP: '203.0.113.5:8443',
+    FRONT_SNI: 'www.microsoft.com'
   });
 
   const plan = cs.pushPlan(s);
   assert.deepEqual(plan.fly.sort(), ['ADMIN_TOKEN', 'PROVISION_SECRET', 'USERS', 'UUID', 'WSPATH']);
   assert.deepEqual(plan.wrangler.sort(), ['PROXYIP', 'UUID', 'WSPATH']);
   assert.deepEqual(plan.deno.sort(), ['PROXYIP', 'UUID', 'WSPATH']);
-  assert.deepEqual(plan.docker.sort(), ['ADMIN_TOKEN', 'PROVISION_SECRET', 'USERS', 'UUID', 'WSPATH']);
+  assert.deepEqual(plan.docker.sort(),
+    ['ADMIN_TOKEN', 'FRONT_SNI', 'PROVISION_SECRET', 'USERS', 'UUID', 'WSPATH']);
   assert.deepEqual(plan.renderOnly.sort(), ['FLY_HOST', 'WORKER_HOST']);
 
   // No SECRET value may appear. Hostnames legitimately do — the PUBLIC_HOST

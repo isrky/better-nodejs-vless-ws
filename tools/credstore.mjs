@@ -162,6 +162,21 @@ export const FIELDS = [
     }
   },
   {
+    // The allowed/high-reputation domain to spoof as the TLS SNI for the fronted
+    // VPS configs. Pushed to the container (as FRONT_SNI) so the provisioning
+    // endpoint can front too; the cert pin is never stored — it is probed live
+    // both by `npm run configs` and by the server. Kept last in the render group
+    // so adding it does not renumber the fields above it.
+    key: 'FRONT_SNI',
+    group: 'render',
+    secret: false,
+    required: false,
+    pushTo: ['docker'],
+    help: 'allowed domain to spoof as the TLS SNI for the domain-fronted VPS configs',
+    normalise: normaliseHost,
+    validate: validateHost
+  },
+  {
     key: 'ADMIN_TOKEN',
     group: 'server',
     secret: true,
@@ -333,7 +348,11 @@ export function requireRenderInputs(store) {
   }
 
   const c = store.credentials;
-  return { uuid: c.UUID, wsPath: c.WSPATH, hosts: { FLY_HOST: c.FLY_HOST, WORKER_HOST: c.WORKER_HOST, DENO_HOST: c.DENO_HOST } };
+  return {
+    uuid: c.UUID,
+    wsPath: c.WSPATH,
+    hosts: { FLY_HOST: c.FLY_HOST, WORKER_HOST: c.WORKER_HOST, DENO_HOST: c.DENO_HOST, VPS_HOST: c.VPS_HOST }
+  };
 }
 
 /**

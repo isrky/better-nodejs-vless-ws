@@ -75,6 +75,10 @@ function loadConfig(env = process.env) {
     sessionTtl: clamp(parseInt(env.SESSION_TTL_SECONDS || '43200', 10), 60, 604800),
     publicHost: String(env.PUBLIC_HOST || '').trim().toLowerCase(),
     publicPort: parseInt(env.PUBLIC_PORT || '443', 10),
+    // Allowed/high-reputation domain to spoof as the TLS SNI for domain-fronted
+    // invites. Unset => fronting disabled and the ?front toggle serves the
+    // standard config. The cert pin is probed at runtime, never configured.
+    frontSni: String(env.FRONT_SNI || '').trim().toLowerCase(),
     interceptCa: String(env.INTERCEPT_CA || ''),
     // Fly terminates TLS upstream, so X-Forwarded-Proto and Fly-Client-IP are
     // only trustworthy when we know we are behind that proxy.

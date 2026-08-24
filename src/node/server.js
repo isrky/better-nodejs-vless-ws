@@ -22,6 +22,7 @@ const { defaultTlsCredentials, looksLikeTls } = require('./tlscert.js');
 const { log: defaultLog } = require('./log.js');
 const { createBurnStore } = require('./tokens.js');
 const { createRateLimiter } = require('./ratelimit.js');
+const { createPinCache } = require('./certpin.js');
 const { handleConnection } = require('./session.js');
 
 /**
@@ -78,7 +79,15 @@ function createServer(options = {}) {
     global: createRateLimiter({ capacity: 120, refillPerSecond: 2 })
   };
 
-  const deps = { config, stats, dns, log, burn, limits };
+  // Domain-fronted invites need the SHA-256 of the cert the public edge serves
+  // for the spoofed SNI. Constructing the cache is inert (no probe, no timer);
+  // the first probe fires only when a fronted invite is actually served, which
+  // keeps createServer() side-effect free.
+  const frontPin = options.frontPin || (config.frontSni && config.publicHost
+    ? createPinCache({ host: config.publicHost, servername: config.frontSni, port: config.publicPort })
+    : null);
+
+  const deps = { config, stats, dns, log, burn, limits, frontPin };
 
   const server = net.createServer((socket) => {
     socket.on('error', () => { try { socket.destroy(); } catch (e) { /* gone */ } });
@@ -114,6 +123,7 @@ function createServer(options = {}) {
     dns,
     close(cb) {
       dns.stop();
+      if (frontPin) frontPin.stop();
       server.close(cb);
     }
   };

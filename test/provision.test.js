@@ -302,6 +302,101 @@ test('the operator toggle rides the invite URL through every hop', async (t) => 
   assert.match(reveal, /conf\.json\?udp=1/, 'and the reveal page must too');
 });
 
+// ---------- domain fronting ----------
+
+const FRONT_PIN = 'c'.repeat(64);
+const FRONT_ENV = { ...ENV, FRONT_SNI: 'www.microsoft.com' };
+
+// Inject a stub pin provider so nothing touches the network. `pin` is what
+// get() resolves to — a hex string when the edge is reachable, null when not.
+function startFront(pin = FRONT_PIN) {
+  return new Promise((resolve) => {
+    const handle = createServer({
+      config: loadConfig(FRONT_ENV),
+      logger: () => {},
+      frontPin: { get: async () => pin, stop() {} }
+    });
+    const open = new Set();
+    handle.server.on('connection', (s) => { open.add(s); s.on('close', () => open.delete(s)); });
+    handle.server.listen(0, '127.0.0.1', () => resolve({
+      port: handle.server.address().port,
+      handle,
+      close: () => new Promise((done) => { handle.close(done); for (const s of open) s.destroy(); })
+    }));
+  });
+}
+
+async function mintFront(port, cookie, label = 'alice') {
+  const body = (await bodyOf(port, `/admin-stats/provision?label=${label}&front=1`, 'GET', cookie)).toString();
+  const m = body.match(/id="qr-data">([^<]*)</);
+  assert.ok(m, 'the provision page must show an invite URL');
+  return m[1].split('/i/')[1];
+}
+
+test('?front=1 serves a spoofed-SNI, cert-pinned config when the edge is reachable', async (t) => {
+  const srv = await startFront(FRONT_PIN);
+  t.after(() => srv.close());
+  const token = (await mintFront(srv.port, await login(srv.port))).split('?')[0];
+
+  const { head, body } = await fetchOf(srv.port, `/i/${token}/conf.json?front=1`);
+  assert.match(head, /filename="vless-alice-fronted\.json"/);
+
+  const tls = JSON.parse(body.toString()).outbounds[0].streamSettings.tlsSettings;
+  assert.equal(tls.serverName, 'www.microsoft.com', 'the SNI is spoofed');
+  assert.equal(tls.pinnedPeerCertSha256, FRONT_PIN);
+  assert.equal(tls.certificates, undefined, 'no CA block when pinning');
+
+  const out = JSON.parse(body.toString()).outbounds[0];
+  assert.equal(out.settings.vnext[0].address, 'edge.example.dev', 'address stays real');
+  assert.equal(out.streamSettings.wsSettings.host, 'edge.example.dev', 'Host stays real');
+});
+
+test('front falls back to the standard config when the pin probe fails', async (t) => {
+  const srv = await startFront(null);   // edge unreachable -> get() resolves null
+  t.after(() => srv.close());
+  const token = (await mintFront(srv.port, await login(srv.port))).split('?')[0];
+
+  const { head, body } = await fetchOf(srv.port, `/i/${token}/conf.json?front=1`);
+  assert.match(head, /filename="vless-alice\.json"/, 'no -fronted suffix on fallback');
+  const tls = JSON.parse(body.toString()).outbounds[0].streamSettings.tlsSettings;
+  assert.equal(tls.serverName, 'edge.example.dev', 'standard SNI');
+  assert.ok(tls.certificates, 'standard CA block is present');
+  assert.equal(tls.pinnedPeerCertSha256, undefined);
+
+  // Reveal a fresh invite to check the fallback note (the first burned its nonce).
+  const token2 = (await mintFront(srv.port, await login(srv.port))).split('?')[0];
+  const reveal = (await fetchOf(srv.port, `/i/${token2}/show?front=1`)).body.toString();
+  assert.match(reveal, /Fronting unavailable/, 'the invitee is told they got the standard profile');
+});
+
+test('the front toggle rides the invite URL through every hop', async (t) => {
+  const srv = await startFront(FRONT_PIN);
+  t.after(() => srv.close());
+  const cookie = await login(srv.port);
+
+  const tail = await mintFront(srv.port, cookie);
+  assert.match(tail, /\?front=1$/, 'the minted invite URL carries the toggle');
+  const token = tail.split('?')[0];
+
+  const landing = (await fetchOf(srv.port, `/i/${token}?front=1`)).body.toString();
+  assert.match(landing, /\/show\?front=1/, 'landing passes it on');
+  const reveal = (await fetchOf(srv.port, `/i/${token}/show?front=1`)).body.toString();
+  assert.match(reveal, /conf\.json\?front=1/, 'and the reveal page too');
+});
+
+test('front is inert when FRONT_SNI is not configured', async (t) => {
+  // Same ?front=1, but a server with no FRONT_SNI must serve the standard config
+  // and never advertise fronting.
+  const srv = await start();
+  t.after(() => srv.close());
+  const token = await mint(srv.port, await login(srv.port));
+
+  const { head, body } = await fetchOf(srv.port, `/i/${token}/conf.json?front=1`);
+  assert.match(head, /filename="vless-alice\.json"/);
+  assert.equal(JSON.parse(body.toString()).outbounds[0].streamSettings.tlsSettings.serverName,
+    'edge.example.dev');
+});
+
 test('without the toggle nothing downstream mentions it', async (t) => {
   const srv = await start();
   t.after(() => srv.close());

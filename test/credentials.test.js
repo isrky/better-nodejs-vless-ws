@@ -107,13 +107,13 @@ test('a required field refuses to be cleared, an optional one accepts it', async
 
   const withToken = cs.withField(cs.readStore(ctx.storePath), 'ADMIN_TOKEN', 'a'.repeat(44));
   cs.writeStore(ctx.storePath, withToken);
-  await drive(['8', 'c', 'q'], { storePath: ctx.storePath, store: withToken });
+  await drive(['9', 'c', 'q'], { storePath: ctx.storePath, store: withToken });
   assert.equal('ADMIN_TOKEN' in cs.readStore(ctx.storePath).credentials, false);
 });
 
 test('PROVISION_SECRET_PREVIOUS cannot be generated from the menu', async () => {
   const ctx = tmpStore();
-  const { said } = await drive(['10', 'g', 'q', 'q'], ctx);
+  const { said } = await drive(['11', 'g', 'q', 'q'], ctx);
   assert.match(said, /cannot be generated/);
 });
 

@@ -43,7 +43,12 @@ export const PROFILES = [
   { out: 'local/conf-android.json', template: 'android-socks.json', hostVar: 'WORKER_HOST', udp: false },
   { out: 'local/conf-android-udp.json', template: 'android-socks.json', hostVar: 'FLY_HOST', udp: true },
   { out: 'local/conf-android-deno.json', template: 'android-socks.json', hostVar: 'DENO_HOST', udp: false },
-  { out: 'local/conf-android-vps.json', template: 'android-socks.json', hostVar: 'VPS_HOST', udp: true }
+  { out: 'local/conf-android-vps.json', template: 'android-socks.json', hostVar: 'VPS_HOST', udp: true },
+  // Domain-fronted fallbacks: rendered only when both VPS_HOST and FRONT_SNI are
+  // set. `front` swaps the tlsSettings to a spoofed SNI + pinned cert (the pin is
+  // probed live at render time); address and wsSettings.host stay the real host.
+  { out: 'local/conf-vps-fronted.json', template: 'linux-tproxy.json', hostVar: 'VPS_HOST', udp: true, front: true },
+  { out: 'local/conf-android-vps-fronted.json', template: 'android-socks.json', hostVar: 'VPS_HOST', udp: true, front: true }
 ];
 
 const NAME_RE = /\$\{([A-Z0-9_]+)\}/g;
@@ -145,6 +150,19 @@ function dropEmptyCertificates(config) {
   }
 }
 
+/**
+ * Rewrite tlsSettings for domain fronting: spoof the SNI and pin the cert by
+ * fingerprint instead of verifying the certificate chain. Mirrors the fronted
+ * branch of buildXrayConfig (src/node/clientconf.js). address and wsSettings.host
+ * are deliberately left as the real host — only the SNI on the wire is a lie.
+ */
+function applyFronting(config, { sni, pin }) {
+  const tls = config.outbounds[0].streamSettings.tlsSettings;
+  tls.serverName = sni;
+  delete tls.certificates;
+  tls.pinnedPeerCertSha256 = pin;
+}
+
 // ==========================================
 // The certificate
 // ==========================================
@@ -213,6 +231,7 @@ function hasKey(node, key) {
 /** Everything here is a failure Xray itself would accept. */
 export function validateConfig(config, profile) {
   const where = profile.out;
+  const fronted = Boolean(profile.front);
 
   walkStrings(config, (value, path) => {
     if (value.includes('${')) fail(`${where} ${path}: unreplaced placeholder ${value}`);
@@ -226,8 +245,20 @@ export function validateConfig(config, profile) {
   const address = vless.settings.vnext[0].address;
 
   // A mismatch here is a Cloudflare 403 with no WebSocket upgrade, which reads
-  // as a network fault rather than a config error.
-  if (ss.tlsSettings.serverName !== address || ss.wsSettings.host !== address) {
+  // as a network fault rather than a config error. Fronting deliberately breaks
+  // the SNI half (the point is to spoof it) but the Host header must still hit
+  // the real backend, and it authenticates by pinned fingerprint instead.
+  if (fronted) {
+    if (ss.wsSettings.host !== address) {
+      fail(`${where}: wsSettings.host must match address even when fronting`);
+    }
+    if (ss.tlsSettings.serverName === address) {
+      fail(`${where}: a fronted config must spoof serverName away from the real host`);
+    }
+    if (!/^[0-9a-f]{64}$/.test(ss.tlsSettings.pinnedPeerCertSha256 || '')) {
+      fail(`${where}: fronted config needs a 64-hex pinnedPeerCertSha256`);
+    }
+  } else if (ss.tlsSettings.serverName !== address || ss.wsSettings.host !== address) {
     fail(`${where}: address, tlsSettings.serverName and wsSettings.host must all match`);
   }
 
@@ -244,8 +275,11 @@ export function validateConfig(config, profile) {
          `xudpProxyUDP443 (${vless.mux.xudpProxyUDP443}) disagree`);
   }
 
-  for (const forbidden of ['alpn', 'allowInsecure', 'pinnedPeerCertSha256']) {
-    if (hasKey(config, forbidden)) fail(`${where}: must not contain "${forbidden}"`);
+  // pinnedPeerCertSha256 is the fronted config's whole point, so it is only
+  // forbidden on the normal profiles.
+  const forbidden = fronted ? ['alpn', 'allowInsecure'] : ['alpn', 'allowInsecure', 'pinnedPeerCertSha256'];
+  for (const key of forbidden) {
+    if (hasKey(config, key)) fail(`${where}: must not contain "${key}"`);
   }
 
   const tags = new Set(config.outbounds.map((o) => o.tag));
@@ -260,7 +294,7 @@ export function validateConfig(config, profile) {
 // Rendering
 // ==========================================
 
-export function renderProfile({ template, host, udpPolicy, uuid, wsPath, caLines, root = ROOT }) {
+export function renderProfile({ template, host, udpPolicy, uuid, wsPath, caLines, front = null, root = ROOT }) {
   const source = JSON.parse(readFileSync(resolve(root, 'templates', template), 'utf8'));
 
   const bindings = {
@@ -278,7 +312,10 @@ export function renderProfile({ template, host, udpPolicy, uuid, wsPath, caLines
   if (errors.length) fail(`templates/${template}:\n  ` + errors.join('\n  '));
 
   dropBlankQuicRule(config);
-  dropEmptyCertificates(config);
+  // Fronting owns tlsSettings entirely (no certificates block); otherwise drop
+  // an empty certificates block as before.
+  if (front) applyFronting(config, front);
+  else dropEmptyCertificates(config);
   return config;
 }
 
@@ -289,7 +326,7 @@ export function renderProfile({ template, host, udpPolicy, uuid, wsPath, caLines
  * came from — and so this function cannot be the thing that reads a file the
  * operator has not been told about.
  */
-function renderAll(store) {
+async function renderAll(store, { probe = true } = {}) {
   const { uuid, wsPath, hosts } = requireRenderInputs(store);
 
   // toRenderEnv is the only thing that builds this object, and it copies with
@@ -299,15 +336,39 @@ function renderAll(store) {
   const env = toRenderEnv(store);
   const caLines = loadCaLines(env);
   const cert = validateCa(caLines);
+  const frontSni = env.FRONT_SNI;
+
+  // A fronted profile also needs FRONT_SNI and a live cert pin. Probe once, up
+  // front: a fronted profile is active only if the probe succeeds, so a
+  // unreachable edge skips the fronted files with a notice rather than failing
+  // the whole render (the normal configs still write). --check passes
+  // probe:false so drift-checking never touches the network.
+  let frontPin = null;
+  if (frontSni && hosts.VPS_HOST && probe) {
+    try {
+      const { fetchCertPin } = require(join(ROOT, 'src/node/certpin.js'));
+      frontPin = await fetchCertPin(hosts.VPS_HOST, frontSni);
+    } catch (e) {
+      console.error(`notice: fronted configs skipped — cert probe of ${hosts.VPS_HOST} ` +
+                    `(SNI ${frontSni}) failed: ${e.message}`);
+    }
+  }
 
   // A profile whose host is unset is skipped, not failed: DENO_HOST is
   // optional, so the -deno configs only appear once a Deno Deploy target
   // exists. Announced rather than dropped silently. (Required hosts are already
   // enforced by requireRenderInputs above, so this only ever skips Deno.)
   const active = PROFILES.filter((profile) => {
-    if (hosts[profile.hostVar]) return true;
-    console.error(`notice: skipping ${profile.out} — ${profile.hostVar} is not set`);
-    return false;
+    if (!hosts[profile.hostVar]) {
+      console.error(`notice: skipping ${profile.out} — ${profile.hostVar} is not set`);
+      return false;
+    }
+    if (profile.front && !frontPin) {
+      if (frontSni && hosts.VPS_HOST) return false;   // probe already explained the skip
+      console.error(`notice: skipping ${profile.out} — FRONT_SNI is not set`);
+      return false;
+    }
+    return true;
   });
 
   // Render and validate everything before writing anything: a failure on the
@@ -319,7 +380,8 @@ function renderAll(store) {
       udpPolicy: profile.udp ? 'all' : 'none',
       uuid,
       wsPath,
-      caLines
+      caLines,
+      front: profile.front ? { sni: frontSni, pin: frontPin } : null
     });
     validateConfig(config, profile);
     return { profile, text: JSON.stringify(config, null, 2) + '\n' };
@@ -366,7 +428,7 @@ function loadStore({ storePath, envPath }) {
 // CLI
 // ==========================================
 
-function main(argv) {
+async function main(argv) {
   if (argv.includes('--help') || argv.includes('-h')) {
     console.log(USAGE);
     return 0;
@@ -379,7 +441,9 @@ function main(argv) {
   };
 
   const store = loadStore({ storePath: flag('--store') || DEFAULT_STORE_PATH, envPath: flag('--env') });
-  const { rendered, uuid, wsPath, hosts, cert, caSource } = renderAll(store);
+  // --check never probes the network: it reports drift only, and a fronted file
+  // that cannot be re-derived offline is reported as skipped, not drifted.
+  const { rendered, uuid, wsPath, hosts, cert, caSource } = await renderAll(store, { probe: !check });
 
   for (const warning of publicHostWarnings(store)) console.error(`warning: ${warning}`);
 
@@ -435,10 +499,10 @@ function main(argv) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  try {
-    process.exit(main(process.argv.slice(2)));
-  } catch (e) {
-    console.error(e instanceof RenderError ? `error: ${e.message}` : e);
-    process.exit(1);
-  }
+  main(process.argv.slice(2))
+    .then((code) => process.exit(code))
+    .catch((e) => {
+      console.error(e instanceof RenderError ? `error: ${e.message}` : e);
+      process.exit(1);
+    });
 }

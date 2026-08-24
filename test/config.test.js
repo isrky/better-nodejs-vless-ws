@@ -24,6 +24,11 @@ test('WSPATH and ADMIN_TOKEN fall back to their defaults', () => {
   assert.equal(loadConfig({ ADMIN_TOKEN: 't' }).adminToken, 't');
 });
 
+test('FRONT_SNI is read, trimmed and lowercased; unset means fronting off', () => {
+  assert.equal(loadConfig({}).frontSni, '', 'unset disables fronting');
+  assert.equal(loadConfig({ FRONT_SNI: '  ChatGPT.com ' }).frontSni, 'chatgpt.com');
+});
+
 test('the UUID is expanded to its 16 bytes', () => {
   const config = loadConfig({ UUID: '00112233-4455-6677-8899-aabbccddeeff' });
   assert.equal(config.uuidBytes.length, 16);
