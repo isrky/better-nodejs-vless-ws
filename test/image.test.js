@@ -107,6 +107,10 @@ test('the Dockerfile still copies what the walk assumes', () => {
   assert.match(dockerfile, /COPY src\/node\//);
   assert.ok(!/npm (install|ci)/.test(dockerfile),
     'adding an install step is a real decision — update these tests deliberately');
+
+  // Hardening the compose stack relies on: dropping either is a real decision.
+  assert.match(dockerfile, /^USER node$/m);
+  assert.match(dockerfile, /^HEALTHCHECK /m);
 });
 
 test('src/vless.js stays runtime-agnostic so the Worker keeps bundling', () => {

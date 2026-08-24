@@ -35,6 +35,7 @@ const USAGE = `manage the credentials in local/credentials.json
   npm run creds:status             redacted report (never prompts)
   npm run creds:push               show the secrets, grouped by dashboard
   npm run creds:env                write local/deno.env for Deno Deploy import
+  npm run creds:docker             write local/docker.env for the VPS compose stack
   node tools/credentials.mjs --push --yes
                                    skip the confirmation (prints secrets)
   node tools/credentials.mjs --import PATH
@@ -89,7 +90,7 @@ export function renderMenu(store, storePath = DEFAULT_STORE_PATH) {
 
   lines.push('');
   lines.push('   r  render the configs      p  reveal secrets to paste');
-  lines.push('   e  export .env for Deno    u  undo last change');
+  lines.push('   e  export env files        u  undo last change');
   lines.push('   q  quit');
   lines.push('');
   return lines.join('\n');
@@ -347,6 +348,27 @@ export function exportDenoEnv(store, storePath, out) {
   return path;
 }
 
+/**
+ * Same contract as exportDenoEnv, for the VPS compose stack: writes the
+ * server-side env to a 0600 `docker.env`, announcing the path and key names
+ * only. VPS_HOST lands in the file as PUBLIC_HOST (the field's exportAs) —
+ * the env name the server actually reads.
+ *
+ * @returns the path written, or null when nothing is set.
+ */
+export function exportDockerEnv(store, storePath, out) {
+  const keys = pushPlan(store).docker;
+  if (!keys.length) {
+    out('  nothing to export — set UUID and WSPATH first');
+    return null;
+  }
+  const path = resolve(dirname(storePath), 'docker.env');
+  writeEnvFile(path, serializeEnv(store, keys));
+  out(`  wrote ${path.replace(ROOT + '/', '')} (${keys.join(', ')})`);
+  out(dim('  paste its contents into the Dockge stack\'s .env editor (TRUST_PROXY is set by compose.yaml)'));
+  return path;
+}
+
 // ==========================================
 // The menu loop
 // ==========================================
@@ -382,7 +404,10 @@ export async function runMenu({ storePath, store, ask, out, render }) {
     }
     if (choice === 'e') {
       try {
+        out(dim('  deno.env — Deno Deploy'));
         exportDenoEnv(store, storePath, out);
+        out(dim('  docker.env — VPS compose stack'));
+        exportDockerEnv(store, storePath, out);
       } catch (e) {
         out(red(`  ${e.message}`));
       }
@@ -497,6 +522,13 @@ async function main(argv) {
     // Writes a file, never prints a secret, so it is safe off a TTY.
     const store = loadStoreOrEmpty(storePath);
     const path = exportDenoEnv(store, storePath, (s) => console.log(s));
+    return path ? 0 : 1;
+  }
+
+  if (argv.includes('--docker-env')) {
+    // Same file-only contract as --deno-env.
+    const store = loadStoreOrEmpty(storePath);
+    const path = exportDockerEnv(store, storePath, (s) => console.log(s));
     return path ? 0 : 1;
   }
 

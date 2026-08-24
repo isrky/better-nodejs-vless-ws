@@ -321,6 +321,7 @@ test('the push plan routes each key to the right place and carries no values', (
   assert.deepEqual(plan.fly.sort(), ['ADMIN_TOKEN', 'PROVISION_SECRET', 'USERS', 'UUID', 'WSPATH']);
   assert.deepEqual(plan.wrangler.sort(), ['PROXYIP', 'UUID', 'WSPATH']);
   assert.deepEqual(plan.deno.sort(), ['PROXYIP', 'UUID', 'WSPATH']);
+  assert.deepEqual(plan.docker.sort(), ['ADMIN_TOKEN', 'PROVISION_SECRET', 'USERS', 'UUID', 'WSPATH']);
   assert.deepEqual(plan.renderOnly.sort(), ['FLY_HOST', 'WORKER_HOST']);
 
   // No SECRET value may appear. Hostnames legitimately do — the PUBLIC_HOST
@@ -335,6 +336,7 @@ test('the push plan routes each key to the right place and carries no values', (
 
 test('unset keys are not pushed', () => {
   assert.deepEqual(cs.pushPlan(fullStore()).fly.sort(), ['UUID', 'WSPATH']);
+  assert.deepEqual(cs.pushPlan(fullStore()).docker.sort(), ['UUID', 'WSPATH']);
 });
 
 test('serializeEnv emits KEY=value for set keys and skips unset ones', () => {
@@ -353,6 +355,12 @@ test('serializeEnv single-quotes a value containing whitespace', () => {
   const s = cs.emptyStore();
   s.credentials.USERS = 'alice bob';
   assert.equal(cs.serializeEnv(s, ['USERS']), "USERS='alice bob'\n");
+});
+
+test('serializeEnv honours exportAs — VPS_HOST becomes PUBLIC_HOST', () => {
+  const s = cs.emptyStore();
+  s.credentials.VPS_HOST = 'vps.example.dev';
+  assert.equal(cs.serializeEnv(s, ['VPS_HOST']), 'PUBLIC_HOST=vps.example.dev\n');
 });
 
 // ---------- redaction ----------

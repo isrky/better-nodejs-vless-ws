@@ -12,3 +12,7 @@ local/
 
 # Third-party MEB network analysis (arinc9, public research) — not ours to redistribute.
 restrictions/
+
+# The compose env file on a VPS — secrets, never committed. The repo itself
+# holds no .env; `npm run creds:docker` writes local/docker.env to paste in.
+.env

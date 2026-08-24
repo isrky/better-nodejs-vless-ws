@@ -170,6 +170,28 @@ The same `Dockerfile` runs on Koyeb/Railway/Render if you prefer their free tier
 
 ---
 
+## VPS with Docker Compose / Dockge
+
+A `compose.yaml` is included for running the container on your own VPS with nginx on the host terminating TLS. It builds the image locally (nothing to pull), publishes the port on loopback only (`127.0.0.1:3000`), and sets `TRUST_PROXY=1`. With [Dockge](https://github.com/louislam/dockge), the repo *is* the stack:
+
+```bash
+cd /opt/stacks
+git clone https://github.com/you/better-nodejs-vless-ws vless-ws
+```
+
+Secrets go in a `.env` next to `compose.yaml` (gitignored). On your own machine, `npm run creds:docker` writes `local/docker.env` with exactly the keys the container reads — `UUID`, `WSPATH`, `ADMIN_TOKEN`, `PROVISION_SECRET`, `USERS`, and `PUBLIC_HOST` (from the store's `VPS_HOST`) — paste its contents into Dockge's env editor, then start the stack. Optionally add `DOH_URL=` there too (deployment config rather than a credential, same as `fly.toml`'s `[env]` block). Updating is `git pull` + rebuild in Dockge; the container drains connections for up to 25 s on stop instead of hard-cutting live tunnels.
+
+The image healthcheck probes `GET /` (served the decoy, always 200), so Dockge shows real health.
+
+Your nginx server block needs the WebSocket headers from the [reverse proxy section](#running-behind-a-reverse-proxy-tls) for `location /<WSPATH>`, plus:
+
+- `proxy_set_header X-Forwarded-Proto https;` and `proxy_set_header X-Forwarded-For $remote_addr;` — with `TRUST_PROXY=1` these drive the `__Host-`/`Secure` admin cookie and the client IPs in stats.
+- Extra `location` blocks for `/admin-stats` and your `INVITE_PATH` prefix (default `/i/`) if you use those features — path-scoping to `/<WSPATH>` alone hides them, which is otherwise a feature.
+
+Setting `VPS_HOST` in `npm run creds` also makes `npm run configs` render UDP-capable client configs for this host (`local/conf-vps.json`, `local/conf-android-vps.json`) — like the Fly ones, unlike the Worker/Deno ones.
+
+---
+
 ## Admin Dashboard
 
 A live stats page is available at:

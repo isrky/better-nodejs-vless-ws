@@ -16,3 +16,5 @@ package-lock.json
 fly.toml
 Dockerfile
 .dockerignore
+.env
+compose.yaml

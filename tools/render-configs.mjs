@@ -32,16 +32,18 @@ import {
 const require = createRequire(import.meta.url);
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-// The four outputs. Host and UDP policy correlate today — the Worker carries no
-// UDP, Fly does — but they are independent knobs; swapping either column is a
-// one-line change.
+// The outputs. Host and UDP policy correlate today — the Worker and Deno carry
+// no UDP, Fly and the VPS do — but they are independent knobs; swapping either
+// column is a one-line change.
 export const PROFILES = [
   { out: 'local/conf.json', template: 'linux-tproxy.json', hostVar: 'WORKER_HOST', udp: false },
   { out: 'local/conf-udp.json', template: 'linux-tproxy.json', hostVar: 'FLY_HOST', udp: true },
   { out: 'local/conf-deno.json', template: 'linux-tproxy.json', hostVar: 'DENO_HOST', udp: false },
+  { out: 'local/conf-vps.json', template: 'linux-tproxy.json', hostVar: 'VPS_HOST', udp: true },
   { out: 'local/conf-android.json', template: 'android-socks.json', hostVar: 'WORKER_HOST', udp: false },
   { out: 'local/conf-android-udp.json', template: 'android-socks.json', hostVar: 'FLY_HOST', udp: true },
-  { out: 'local/conf-android-deno.json', template: 'android-socks.json', hostVar: 'DENO_HOST', udp: false }
+  { out: 'local/conf-android-deno.json', template: 'android-socks.json', hostVar: 'DENO_HOST', udp: false },
+  { out: 'local/conf-android-vps.json', template: 'android-socks.json', hostVar: 'VPS_HOST', udp: true }
 ];
 
 const NAME_RE = /\$\{([A-Z0-9_]+)\}/g;

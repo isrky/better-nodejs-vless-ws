@@ -107,13 +107,13 @@ test('a required field refuses to be cleared, an optional one accepts it', async
 
   const withToken = cs.withField(cs.readStore(ctx.storePath), 'ADMIN_TOKEN', 'a'.repeat(44));
   cs.writeStore(ctx.storePath, withToken);
-  await drive(['7', 'c', 'q'], { storePath: ctx.storePath, store: withToken });
+  await drive(['8', 'c', 'q'], { storePath: ctx.storePath, store: withToken });
   assert.equal('ADMIN_TOKEN' in cs.readStore(ctx.storePath).credentials, false);
 });
 
 test('PROVISION_SECRET_PREVIOUS cannot be generated from the menu', async () => {
   const ctx = tmpStore();
-  const { said } = await drive(['9', 'g', 'q', 'q'], ctx);
+  const { said } = await drive(['10', 'g', 'q', 'q'], ctx);
   assert.match(said, /cannot be generated/);
 });
 
@@ -142,22 +142,22 @@ test('the CA submenu sets all three states without ever typing an empty string',
   const ctx = tmpStore();
 
   // 2 = none -> the explicit empty string
-  await drive(['6', '2', 'q'], ctx);
+  await drive(['7', '2', 'q'], ctx);
   assert.equal(cs.readStore(ctx.storePath).credentials.INTERCEPT_CA_FILE, '');
 
   // 1 = bundled -> the key is deleted, which is a different state from ''
-  await drive(['6', '1', 'q'], { storePath: ctx.storePath, store: cs.readStore(ctx.storePath) });
+  await drive(['7', '1', 'q'], { storePath: ctx.storePath, store: cs.readStore(ctx.storePath) });
   assert.equal('INTERCEPT_CA_FILE' in cs.readStore(ctx.storePath).credentials, false);
 
   // 3 = a path
-  await drive(['6', '3', 'test/fixtures/ca.pem', 'q'],
+  await drive(['7', '3', 'test/fixtures/ca.pem', 'q'],
     { storePath: ctx.storePath, store: cs.readStore(ctx.storePath) });
   assert.equal(cs.readStore(ctx.storePath).credentials.INTERCEPT_CA_FILE, 'test/fixtures/ca.pem');
 });
 
 test('the CA submenu rejects a DER path and re-prompts', async () => {
   const ctx = tmpStore();
-  const { said } = await drive(['6', '3', 'MEB_SERTIFIKASI.cer', 'q', 'q'], ctx);
+  const { said } = await drive(['7', '3', 'MEB_SERTIFIKASI.cer', 'q', 'q'], ctx);
   assert.match(said, /DER/);
 });
 
@@ -310,6 +310,28 @@ test('e reports nothing to export when no deno vars are set', async () => {
   const { said } = await drive(['e', 'q'], { storePath: p, store });
   assert.match(said, /nothing to export/);
   assert.ok(!fs.existsSync(path.join(path.dirname(p), 'deno.env')), 'no file is written');
+  assert.ok(!fs.existsSync(path.join(path.dirname(p), 'docker.env')), 'no file is written');
+});
+
+test('e also exports a 0600 docker.env with VPS_HOST renamed to PUBLIC_HOST', async () => {
+  const ctx = tmpStore();
+  const withHost = cs.withField(ctx.store, 'VPS_HOST', 'vps.example.dev');
+  cs.writeStore(ctx.storePath, withHost);
+  const { said } = await drive(['e', 'q'], { storePath: ctx.storePath, store: withHost });
+
+  const envPath = path.join(path.dirname(ctx.storePath), 'docker.env');
+  assert.ok(fs.existsSync(envPath), 'docker.env is written');
+  assert.equal((fs.statSync(envPath).mode & 0o777).toString(8), '600', 'mode is 0600');
+
+  const text = fs.readFileSync(envPath, 'utf8');
+  assert.match(text, /^UUID=00000000-0000-4000-8000-000000000001$/m);
+  assert.match(text, /^WSPATH=\/test-ws-path$/m);
+  assert.match(text, /^PUBLIC_HOST=vps\.example\.dev$/m, 'exported under the name the server reads');
+  assert.ok(!text.includes('VPS_HOST'), 'the store key itself never appears');
+  assert.ok(!text.includes('FLY_HOST'), 'only the docker vars are exported');
+
+  assert.ok(!said.includes(ctx.store.credentials.UUID), 'no secret printed to the terminal');
+  assert.match(said, /wrote .*docker\.env \(UUID, WSPATH, VPS_HOST\)/);
 });
 
 test('the platform names come from the committed config, and degrade when absent', () => {

@@ -77,7 +77,7 @@ export const FIELDS = [
     group: 'render',
     secret: true,
     required: true,
-    pushTo: ['fly', 'wrangler', 'deno'],
+    pushTo: ['fly', 'wrangler', 'deno', 'docker'],
     help: 'the tunnel credential; both deployments and every client config need it',
     generate: () => randomUUID(),
     validate: (v) => {
@@ -91,7 +91,7 @@ export const FIELDS = [
     group: 'render',
     secret: true,
     required: true,
-    pushTo: ['fly', 'wrangler', 'deno'],
+    pushTo: ['fly', 'wrangler', 'deno', 'docker'],
     help: 'the WebSocket path; obscurity only — the UUID is the credential',
     generate: () => '/' + randomBytes(16).toString('hex'),
     validate: (v) => {
@@ -134,6 +134,19 @@ export const FIELDS = [
     validate: validateHost
   },
   {
+    // Optional like DENO_HOST: the -vps configs render only once this is set.
+    // Exported to docker.env as PUBLIC_HOST — the env name the server reads.
+    key: 'VPS_HOST',
+    group: 'render',
+    secret: false,
+    required: false,
+    pushTo: ['docker'],
+    exportAs: 'PUBLIC_HOST',
+    help: 'hostname the VPS nginx serves; used by the UDP-capable -vps configs and docker.env',
+    normalise: normaliseHost,
+    validate: validateHost
+  },
+  {
     key: 'INTERCEPT_CA_FILE',
     group: 'render',
     secret: false,
@@ -153,7 +166,7 @@ export const FIELDS = [
     group: 'server',
     secret: true,
     required: false,
-    pushTo: ['fly'],
+    pushTo: ['fly', 'docker'],
     help: 'gates /admin-stats',
     // Hex rather than base64: this token is only ever consumed as ?token= in a
     // URL, and base64's "+" decodes to a space there. A pasted base64 token
@@ -178,7 +191,7 @@ export const FIELDS = [
     group: 'server',
     secret: true,
     required: false,
-    pushTo: ['fly'],
+    pushTo: ['fly', 'docker'],
     help: 'every provisioned user UUID is derived from this',
     // Hex for the same reason as ADMIN_TOKEN, though this one never reaches a
     // URL. Keeping one alphabet for every generated secret makes "a generated
@@ -192,7 +205,7 @@ export const FIELDS = [
     group: 'server',
     secret: true,
     required: false,
-    pushTo: ['fly'],
+    pushTo: ['fly', 'docker'],
     // Never generated: it only ever holds a value that was previously current,
     // so generating one would authenticate a credential nobody was ever issued.
     help: 'the previous provisioning secret, accepted during a rotation',
@@ -203,7 +216,7 @@ export const FIELDS = [
     group: 'server',
     secret: false,
     required: false,
-    pushTo: ['fly'],
+    pushTo: ['fly', 'docker'],
     help: 'space or comma separated labels of provisioned users',
     validate: (v) => {
       const { labels, rejected } = users().parseUserLabels(v);
@@ -545,6 +558,7 @@ export function pushPlan(store) {
     fly: set('fly'),
     wrangler: set('wrangler'),
     deno: set('deno'),
+    docker: set('docker'),
     renderOnly,
     warnings: publicHostWarnings(store)
   };
@@ -557,13 +571,18 @@ export function pushPlan(store) {
  * Managed values are URL-safe by validation (no whitespace or `#`), so they need
  * no quoting; a value that somehow contains either is single-quoted defensively
  * so a hand-entered oddity round-trips rather than truncating at the `#`.
+ *
+ * A field with `exportAs` is written under that name — the store key and the
+ * env var the server reads are not always the same fact (VPS_HOST is
+ * PUBLIC_HOST to the container).
  */
 export function serializeEnv(store, keys) {
   const out = [];
   for (const key of keys) {
     const value = store.credentials[key];
     if (value === undefined || value === null) continue;
-    out.push(`${key}=${/[\s#]/.test(value) ? `'${value}'` : value}`);
+    const name = FIELDS.find((f) => f.key === key)?.exportAs || key;
+    out.push(`${name}=${/[\s#]/.test(value) ? `'${value}'` : value}`);
   }
   return out.length ? out.join('\n') + '\n' : '';
 }

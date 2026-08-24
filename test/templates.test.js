@@ -209,13 +209,13 @@ test('normaliseWsPath yields exactly one leading slash', () => {
 
 test('the profile table covers both templates and both udp modes', () => {
   const { PROFILES } = renderer;
-  assert.equal(PROFILES.length, 6);
-  assert.equal(new Set(PROFILES.map((p) => p.out)).size, 6, 'no duplicate outputs');
-  assert.equal(PROFILES.filter((p) => p.udp).length, 2);
+  assert.equal(PROFILES.length, 8);
+  assert.equal(new Set(PROFILES.map((p) => p.out)).size, 8, 'no duplicate outputs');
+  assert.equal(PROFILES.filter((p) => p.udp).length, 4);
 
   for (const p of PROFILES) {
     assert.ok(templateFiles().includes(p.template), `${p.out}: unknown template ${p.template}`);
-    assert.ok(['FLY_HOST', 'WORKER_HOST', 'DENO_HOST'].includes(p.hostVar));
+    assert.ok(['FLY_HOST', 'WORKER_HOST', 'DENO_HOST', 'VPS_HOST'].includes(p.hostVar));
     assert.ok(p.out.startsWith('local/'));
   }
 
@@ -224,10 +224,14 @@ test('the profile table covers both templates and both udp modes', () => {
   assert.ok(PROFILES.some((p) => p.out === 'local/conf-android.json'),
     'qr.mjs depends on this filename');
 
-  // Only the Fly host carries UDP; the Worker and Deno targets never do, so a
-  // udp profile must be paired with FLY_HOST.
+  // Only the Node-runtime hosts (Fly, the VPS) carry UDP; the Worker and Deno
+  // targets never do.
   for (const p of PROFILES) {
-    if (p.udp) assert.equal(p.hostVar, 'FLY_HOST', `${p.out}: udp requires the Fly host`);
+    if (p.udp) {
+      assert.ok(['FLY_HOST', 'VPS_HOST'].includes(p.hostVar),
+        `${p.out}: udp requires a Node-runtime host`);
+    }
     if (p.hostVar === 'DENO_HOST') assert.equal(p.udp, false, `${p.out}: Deno carries no UDP`);
+    if (p.hostVar === 'WORKER_HOST') assert.equal(p.udp, false, `${p.out}: the Worker carries no UDP`);
   }
 });

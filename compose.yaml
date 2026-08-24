@@ -1,0 +1,19 @@
+# Dockge stack for the Node build. Clone this repo as the stack directory
+# (e.g. /opt/stacks/vless-ws) and put the secrets in .env next to this file —
+# `npm run creds:docker` on your machine writes local/docker.env to paste into
+# Dockge's env editor. Updates: git pull, then rebuild the stack.
+#
+# nginx runs on the host and terminates TLS, so the port is published on
+# loopback only. Outbound UDP relays use ephemeral source ports, so default
+# bridge networking needs no extra publishes.
+services:
+  vless-ws:
+    build: .
+    restart: unless-stopped
+    stop_grace_period: 30s          # > the 25s in-app drain cap in appws.js
+    ports:
+      - "127.0.0.1:3000:3000"       # host nginx proxies to this; never public
+    env_file:
+      - .env
+    environment:
+      TRUST_PROXY: "1"              # nginx sets X-Forwarded-Proto/For; see README
