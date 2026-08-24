@@ -181,8 +181,8 @@ function renderProvisionPage({ labels, minted = null, publicHost = '', fronting 
             <hgroup>
                 <h2>Invite for ${escapeHtml(minted.label)}</h2>
                 <p>Expires ${escapeHtml(minted.expiresAt)} &mdash; scan or send it before then.</p>
-                <p><small>UDP policy: <strong>${minted.udp ? 'QUIC tunnelled too' : 'QUIC blocked (default)'}</strong>${minted.front ? ' &middot; <strong>domain-fronted SNI</strong>' : ''}
-                &mdash; downloads as <code>vless-${escapeHtml(minted.label)}${minted.udp ? '-udp' : ''}${minted.front ? '-fronted' : ''}.json</code></small></p>
+                <p><small>UDP policy: <strong>${minted.udp ? 'QUIC tunnelled too' : 'QUIC blocked (default)'}</strong>${minted.front === 'pin' ? ' &middot; <strong>fronted (pinned)</strong>' : minted.front === 'ca' ? ' &middot; <strong>fronted (CA-trust)</strong>' : ''}
+                &mdash; downloads as <code>vless-${escapeHtml(minted.label)}${minted.udp ? '-udp' : ''}${minted.front === 'pin' ? '-fronted' : minted.front === 'ca' ? '-mitm' : ''}.json</code></small></p>
             </hgroup>
 ${qrBlock(minted.url)}
             <p class="warn"><small>Anyone who opens this link before it expires gets
@@ -214,13 +214,16 @@ ${hostWarning}
             <small>For comparing. The default blocks QUIC so browsers stay on
             TCP/TLS; ordinary UDP &mdash; games, voice chat &mdash; is tunnelled
             either way.</small>${fronting ? `
-            <label for="front">
-                <input type="checkbox" id="front" name="front" value="1">
-                Domain-front the SNI
-            </label>
-            <small>Sends an allowed domain as the TLS SNI and pins the real
-            certificate &mdash; a fallback for when the real hostname gets
-            filtered. Only for networks that block on SNI.</small>` : ''}
+            <label for="front">Domain fronting</label>
+            <select id="front" name="front">
+                <option value="">None (real SNI)</option>
+                <option value="pin">Pinned &mdash; networks that don't inspect TLS</option>
+                <option value="ca">CA-trust &mdash; TLS-inspecting networks (e.g. school)</option>
+            </select>
+            <small>Sends an allowed domain as the TLS SNI &mdash; a fallback for
+            when the real hostname gets filtered. <strong>Pinned</strong> pins the
+            real certificate (breaks under TLS inspection); <strong>CA-trust</strong>
+            keeps the certificate check, for a network that re-signs TLS.</small>` : ''}
             <button type="submit"${labels.length === 0 ? ' disabled' : ''}>Create invite</button>
         </form>
 ${emptyNote}

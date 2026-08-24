@@ -70,13 +70,18 @@ const INVITE_GRACE_MS = 5 * 60 * 1000;
 // Only ever used to name a downloaded file and to label a profile.
 const SAFE_LABEL = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
+// Domain-fronting modes the endpoint accepts: 'pin' (spoofed SNI + probed cert
+// pin, for non-inspected networks) and 'ca' (spoofed SNI + CA verify, for
+// TLS-inspecting networks). Anything else means no fronting.
+const FRONT_MODES = new Set(['pin', 'ca']);
+
 // The operator's per-invite toggles, encoded as a query string that has to ride
 // unchanged across every hop (landing -> show -> conf.json). Dropping one at any
 // hop silently serves a different variant than the operator chose.
-function toggleQs(udp, front) {
+function toggleQs(udp, frontMode) {
   const parts = [];
   if (udp) parts.push('udp=1');
-  if (front) parts.push('front=1');
+  if (frontMode) parts.push('front=' + frontMode);
   return parts.length ? '?' + parts.join('&') : '';
 }
 
@@ -461,7 +466,8 @@ class Session {
     const udp = params.get('udp') === '1';
     // Fronting is only offered when FRONT_SNI is configured; otherwise the
     // toggle is inert and the standard config is served.
-    const front = params.get('front') === '1' && Boolean(this.config.frontSni);
+    const front = this.config.frontSni && FRONT_MODES.has(params.get('front'))
+      ? params.get('front') : '';
 
     let minted = null;
     const user = label ? this.config.registry.mintable(label) : null;
@@ -542,8 +548,9 @@ class Session {
     // only when FRONT_SNI is configured.
     const toggles = new URLSearchParams(req.query || '');
     const wantUdp = toggles.get('udp') === '1';
-    const wantFront = toggles.get('front') === '1' && Boolean(this.config.frontSni);
-    const qs = toggleQs(wantUdp, wantFront);
+    const frontMode = this.config.frontSni && FRONT_MODES.has(toggles.get('front'))
+      ? toggles.get('front') : '';
+    const qs = toggleQs(wantUdp, frontMode);
 
     // The landing page burns nothing: chat clients fetch a pasted URL to build
     // a preview, and burning here would kill the invite before the human taps.
@@ -577,17 +584,22 @@ class Session {
       udpPolicy: wantUdp ? 'all' : 'noquic'
     };
 
-    // Fronting needs the pin of the cert the edge serves for the spoofed SNI.
-    // The probe never throws (the cache swallows failures); a null pin means the
-    // edge was unreachable, so we fall back to the standard config rather than
-    // hand out one that cannot connect.
+    // 'pin' needs the live cert pin (the cache swallows probe failures; a null
+    // pin means the edge was unreachable, so fall back to the standard config).
+    // 'ca' needs no pin — buildXrayConfig keeps the CA block and just spoofs the
+    // SNI, which a TLS-inspecting network re-signs for.
     let frontSni = null;
     let pinnedSha256 = null;
-    if (wantFront && this.deps.frontPin) {
+    if (frontMode === 'pin' && this.deps.frontPin) {
       const pin = await this.deps.frontPin.get();
       if (pin) { frontSni = this.config.frontSni; pinnedSha256 = pin; }
+    } else if (frontMode === 'ca') {
+      frontSni = this.config.frontSni;
     }
-    const fronted = Boolean(frontSni && pinnedSha256);
+    const frontedPin = Boolean(frontSni && pinnedSha256);
+    const frontedCa = frontMode === 'ca' && Boolean(frontSni);
+    const suffix = frontedPin ? '-fronted' : frontedCa ? '-mitm' : '';
+    const tag = frontedPin ? ' (fronted-pin)' : frontedCa ? ' (fronted-ca)' : '';
 
     // Built once and shared: the reveal page's copy button and the download
     // must hand over identical bytes. Two build sites that could drift is the
@@ -600,9 +612,8 @@ class Session {
     }), null, 2);
 
     if (action === '/conf.json') {
-      const name = `vless-${user.label}` +
-        `${profile.udpPolicy === 'all' ? '-udp' : ''}${fronted ? '-fronted' : ''}.json`;
-      this.log('PROVISION', `Config downloaded for ${user.label}${fronted ? ' (fronted)' : ''}`);
+      const name = `vless-${user.label}${profile.udpPolicy === 'all' ? '-udp' : ''}${suffix}.json`;
+      this.log('PROVISION', `Config downloaded for ${user.label}${tag}`);
       sendHttpResponse(this.#client, 200, JSON_TYPE, configJson, [
         `Content-Disposition: attachment; filename="${name}"`,
         'Referrer-Policy: no-referrer'
@@ -610,14 +621,14 @@ class Session {
       return this.destroy('Invite config served');
     }
 
-    this.log('PROVISION', `Invite revealed for ${user.label}${fronted ? ' (fronted)' : ''}`);
+    this.log('PROVISION', `Invite revealed for ${user.label}${tag}`);
     sendHttpResponse(this.#client, 200, HTML, renderRevealPage({
       label: user.label,
       confUrl: this.config.invitePath + token + '/conf.json' + qs,
       configJson,
-      // Only surfaced when the operator asked to front but the edge probe failed,
-      // so the invitee knows they got the standard profile, not the fronted one.
-      fallbackNote: wantFront && !fronted
+      // Only 'pin' can fall back: surfaced when the operator asked for it but the
+      // edge probe failed, so the invitee knows they got the standard profile.
+      fallbackNote: frontMode === 'pin' && !frontedPin
     }), ['Referrer-Policy: no-referrer']);
     this.destroy('Invite revealed');
   }

@@ -44,11 +44,16 @@ export const PROFILES = [
   { out: 'local/conf-android-udp.json', template: 'android-socks.json', hostVar: 'FLY_HOST', udp: true },
   { out: 'local/conf-android-deno.json', template: 'android-socks.json', hostVar: 'DENO_HOST', udp: false },
   { out: 'local/conf-android-vps.json', template: 'android-socks.json', hostVar: 'VPS_HOST', udp: true },
-  // Domain-fronted fallbacks: rendered only when both VPS_HOST and FRONT_SNI are
-  // set. `front` swaps the tlsSettings to a spoofed SNI + pinned cert (the pin is
-  // probed live at render time); address and wsSettings.host stay the real host.
-  { out: 'local/conf-vps-fronted.json', template: 'linux-tproxy.json', hostVar: 'VPS_HOST', udp: true, front: true },
-  { out: 'local/conf-android-vps-fronted.json', template: 'android-socks.json', hostVar: 'VPS_HOST', udp: true, front: true }
+  // Domain-fronted fallbacks (VPS_HOST + FRONT_SNI). Two modes:
+  //   'pin' — spoofed SNI + pinned real cert (probed live). For networks that
+  //           do NOT inspect the front SNI.
+  //   'ca'  — spoofed SNI, cert still CA-verified (keeps the certificates block,
+  //           no probe). For networks that MITM the front SNI, e.g. inside MEB.
+  // address and wsSettings.host stay the real host in both.
+  { out: 'local/conf-vps-fronted.json', template: 'linux-tproxy.json', hostVar: 'VPS_HOST', udp: true, front: 'pin' },
+  { out: 'local/conf-android-vps-fronted.json', template: 'android-socks.json', hostVar: 'VPS_HOST', udp: true, front: 'pin' },
+  { out: 'local/conf-vps-mitm.json', template: 'linux-tproxy.json', hostVar: 'VPS_HOST', udp: true, front: 'ca' },
+  { out: 'local/conf-android-vps-mitm.json', template: 'android-socks.json', hostVar: 'VPS_HOST', udp: true, front: 'ca' }
 ];
 
 const NAME_RE = /\$\{([A-Z0-9_]+)\}/g;
@@ -151,16 +156,22 @@ function dropEmptyCertificates(config) {
 }
 
 /**
- * Rewrite tlsSettings for domain fronting: spoof the SNI and pin the cert by
- * fingerprint instead of verifying the certificate chain. Mirrors the fronted
- * branch of buildXrayConfig (src/node/clientconf.js). address and wsSettings.host
- * are deliberately left as the real host — only the SNI on the wire is a lie.
+ * Rewrite tlsSettings for domain fronting: spoof the SNI. Mirrors the fronted
+ * branches of buildXrayConfig (src/node/clientconf.js). address and
+ * wsSettings.host are deliberately left as the real host — only the SNI on the
+ * wire is a lie.
+ *
+ * With a pin: authenticate by fingerprint (drop the CA block). Without one: keep
+ * the rendered certificates block — a TLS-inspecting network mints a cert
+ * matching the spoofed SNI signed by the CA the config already trusts.
  */
 function applyFronting(config, { sni, pin }) {
   const tls = config.outbounds[0].streamSettings.tlsSettings;
   tls.serverName = sni;
-  delete tls.certificates;
-  tls.pinnedPeerCertSha256 = pin;
+  if (pin) {
+    delete tls.certificates;
+    tls.pinnedPeerCertSha256 = pin;
+  }
 }
 
 // ==========================================
@@ -231,7 +242,7 @@ function hasKey(node, key) {
 /** Everything here is a failure Xray itself would accept. */
 export function validateConfig(config, profile) {
   const where = profile.out;
-  const fronted = Boolean(profile.front);
+  const front = profile.front || null;          // null | 'pin' | 'ca'
 
   walkStrings(config, (value, path) => {
     if (value.includes('${')) fail(`${where} ${path}: unreplaced placeholder ${value}`);
@@ -247,16 +258,23 @@ export function validateConfig(config, profile) {
   // A mismatch here is a Cloudflare 403 with no WebSocket upgrade, which reads
   // as a network fault rather than a config error. Fronting deliberately breaks
   // the SNI half (the point is to spoof it) but the Host header must still hit
-  // the real backend, and it authenticates by pinned fingerprint instead.
-  if (fronted) {
+  // the real backend. 'pin' then authenticates by fingerprint; 'ca' keeps the
+  // certificate chain (a TLS-inspecting network re-signs it for the spoofed SNI).
+  if (front) {
     if (ss.wsSettings.host !== address) {
       fail(`${where}: wsSettings.host must match address even when fronting`);
     }
     if (ss.tlsSettings.serverName === address) {
       fail(`${where}: a fronted config must spoof serverName away from the real host`);
     }
-    if (!/^[0-9a-f]{64}$/.test(ss.tlsSettings.pinnedPeerCertSha256 || '')) {
-      fail(`${where}: fronted config needs a 64-hex pinnedPeerCertSha256`);
+    if (front === 'pin') {
+      if (!/^[0-9a-f]{64}$/.test(ss.tlsSettings.pinnedPeerCertSha256 || '')) {
+        fail(`${where}: a pinned fronted config needs a 64-hex pinnedPeerCertSha256`);
+      }
+    } else {   // 'ca'
+      if (!(ss.tlsSettings.certificates?.[0]?.certificate?.length > 0)) {
+        fail(`${where}: a ca-fronted config needs a non-empty certificates block`);
+      }
     }
   } else if (ss.tlsSettings.serverName !== address || ss.wsSettings.host !== address) {
     fail(`${where}: address, tlsSettings.serverName and wsSettings.host must all match`);
@@ -275,9 +293,11 @@ export function validateConfig(config, profile) {
          `xudpProxyUDP443 (${vless.mux.xudpProxyUDP443}) disagree`);
   }
 
-  // pinnedPeerCertSha256 is the fronted config's whole point, so it is only
-  // forbidden on the normal profiles.
-  const forbidden = fronted ? ['alpn', 'allowInsecure'] : ['alpn', 'allowInsecure', 'pinnedPeerCertSha256'];
+  // pinnedPeerCertSha256 is legitimate ONLY on the pinned fronted profiles; the
+  // ca variant authenticates by chain and must not carry one.
+  const forbidden = front === 'pin'
+    ? ['alpn', 'allowInsecure']
+    : ['alpn', 'allowInsecure', 'pinnedPeerCertSha256'];
   for (const key of forbidden) {
     if (hasKey(config, key)) fail(`${where}: must not contain "${key}"`);
   }
@@ -312,8 +332,8 @@ export function renderProfile({ template, host, udpPolicy, uuid, wsPath, caLines
   if (errors.length) fail(`templates/${template}:\n  ` + errors.join('\n  '));
 
   dropBlankQuicRule(config);
-  // Fronting owns tlsSettings entirely (no certificates block); otherwise drop
-  // an empty certificates block as before.
+  // Fronting rewrites tlsSettings (spoof the SNI, and for 'pin' swap the CA
+  // block for a fingerprint); otherwise drop an empty certificates block as before.
   if (front) applyFronting(config, front);
   else dropEmptyCertificates(config);
   return config;
@@ -338,18 +358,17 @@ async function renderAll(store, { probe = true } = {}) {
   const cert = validateCa(caLines);
   const frontSni = env.FRONT_SNI;
 
-  // A fronted profile also needs FRONT_SNI and a live cert pin. Probe once, up
-  // front: a fronted profile is active only if the probe succeeds, so a
-  // unreachable edge skips the fronted files with a notice rather than failing
-  // the whole render (the normal configs still write). --check passes
-  // probe:false so drift-checking never touches the network.
+  // The 'pin' fronted profiles need a live cert pin. Probe once, up front: an
+  // unreachable edge skips only the pinned files with a notice rather than
+  // failing the whole render (normal and ca-fronted configs still write).
+  // --check passes probe:false so drift-checking never touches the network.
   let frontPin = null;
   if (frontSni && hosts.VPS_HOST && probe) {
     try {
       const { fetchCertPin } = require(join(ROOT, 'src/node/certpin.js'));
       frontPin = await fetchCertPin(hosts.VPS_HOST, frontSni);
     } catch (e) {
-      console.error(`notice: fronted configs skipped — cert probe of ${hosts.VPS_HOST} ` +
+      console.error(`notice: pinned fronted configs skipped — cert probe of ${hosts.VPS_HOST} ` +
                     `(SNI ${frontSni}) failed: ${e.message}`);
     }
   }
@@ -363,9 +382,18 @@ async function renderAll(store, { probe = true } = {}) {
       console.error(`notice: skipping ${profile.out} — ${profile.hostVar} is not set`);
       return false;
     }
-    if (profile.front && !frontPin) {
-      if (frontSni && hosts.VPS_HOST) return false;   // probe already explained the skip
+    if (!profile.front) return true;
+    if (!frontSni) {
       console.error(`notice: skipping ${profile.out} — FRONT_SNI is not set`);
+      return false;
+    }
+    // 'pin' needs a live cert pin; if the probe failed it was already announced.
+    if (profile.front === 'pin' && !frontPin) return false;
+    // 'ca' needs a CA to verify the re-signed cert against — a spoofed name with
+    // no pinned CA cannot be verified.
+    if (profile.front === 'ca' && !(caLines.length > 0)) {
+      console.error(`notice: skipping ${profile.out} — needs a pinned CA ` +
+                    `(INTERCEPT_CA_FILE is "none")`);
       return false;
     }
     return true;
@@ -374,6 +402,9 @@ async function renderAll(store, { probe = true } = {}) {
   // Render and validate everything before writing anything: a failure on the
   // last profile must not leave the earlier ones replaced.
   const rendered = active.map((profile) => {
+    const front = profile.front
+      ? { sni: frontSni, pin: profile.front === 'pin' ? frontPin : null }
+      : null;
     const config = renderProfile({
       template: profile.template,
       host: hosts[profile.hostVar],
@@ -381,7 +412,7 @@ async function renderAll(store, { probe = true } = {}) {
       uuid,
       wsPath,
       caLines,
-      front: profile.front ? { sni: frontSni, pin: frontPin } : null
+      front
     });
     validateConfig(config, profile);
     return { profile, text: JSON.stringify(config, null, 2) + '\n' };

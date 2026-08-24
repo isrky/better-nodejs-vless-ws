@@ -138,14 +138,24 @@ test('a fronted config spoofs the SNI and pins the cert instead of the CA', () =
   assert.equal(out.streamSettings.wsSettings.host, ARGS.host);
 });
 
-test('fronting needs BOTH sni and pin, else it falls back to the normal shape', () => {
-  const onlySni = buildXrayConfig({ ...ARGS, frontSni: 'chatgpt.com' });
-  assert.equal(onlySni.outbounds[0].streamSettings.tlsSettings.serverName, ARGS.host);
-  assert.ok(onlySni.outbounds[0].streamSettings.tlsSettings.certificates);
+test('frontSni without a pin is the CA-fronted mode: spoofed SNI, CA kept', () => {
+  const conf = buildXrayConfig({ ...ARGS, frontSni: 'chatgpt.com' });
+  const tls = conf.outbounds[0].streamSettings.tlsSettings;
 
+  assert.equal(tls.serverName, 'chatgpt.com', 'SNI is still spoofed without a pin');
+  assert.deepEqual(tls.certificates[0].certificate, INTERCEPT_CA_PEM, 'CA verify block is kept');
+  assert.equal(tls.pinnedPeerCertSha256, undefined, 'no pin in CA mode');
+  // Real host still on the wire where it must be.
+  assert.equal(conf.outbounds[0].settings.vnext[0].address, ARGS.host);
+  assert.equal(conf.outbounds[0].streamSettings.wsSettings.host, ARGS.host);
+});
+
+test('a pin with no frontSni is ignored (no serverName spoof, no pin emitted)', () => {
   const onlyPin = buildXrayConfig({ ...ARGS, pinnedSha256: 'a'.repeat(64) });
-  assert.equal(onlyPin.outbounds[0].streamSettings.tlsSettings.serverName, ARGS.host);
-  assert.equal(onlyPin.outbounds[0].streamSettings.tlsSettings.pinnedPeerCertSha256, undefined);
+  const tls = onlyPin.outbounds[0].streamSettings.tlsSettings;
+  assert.equal(tls.serverName, ARGS.host, 'no front domain -> real SNI');
+  assert.equal(tls.pinnedPeerCertSha256, undefined, 'a pin without a front SNI is dropped');
+  assert.ok(tls.certificates, 'normal CA block');
 });
 
 test('the baked CA is the fatihca root and is well-formed PEM', () => {

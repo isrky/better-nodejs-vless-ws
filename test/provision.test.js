@@ -326,19 +326,19 @@ function startFront(pin = FRONT_PIN) {
   });
 }
 
-async function mintFront(port, cookie, label = 'alice') {
-  const body = (await bodyOf(port, `/admin-stats/provision?label=${label}&front=1`, 'GET', cookie)).toString();
+async function mintFront(port, cookie, mode = 'pin', label = 'alice') {
+  const body = (await bodyOf(port, `/admin-stats/provision?label=${label}&front=${mode}`, 'GET', cookie)).toString();
   const m = body.match(/id="qr-data">([^<]*)</);
   assert.ok(m, 'the provision page must show an invite URL');
   return m[1].split('/i/')[1];
 }
 
-test('?front=1 serves a spoofed-SNI, cert-pinned config when the edge is reachable', async (t) => {
+test('?front=pin serves a spoofed-SNI, cert-pinned config when the edge is reachable', async (t) => {
   const srv = await startFront(FRONT_PIN);
   t.after(() => srv.close());
-  const token = (await mintFront(srv.port, await login(srv.port))).split('?')[0];
+  const token = (await mintFront(srv.port, await login(srv.port), 'pin')).split('?')[0];
 
-  const { head, body } = await fetchOf(srv.port, `/i/${token}/conf.json?front=1`);
+  const { head, body } = await fetchOf(srv.port, `/i/${token}/conf.json?front=pin`);
   assert.match(head, /filename="vless-alice-fronted\.json"/);
 
   const tls = JSON.parse(body.toString()).outbounds[0].streamSettings.tlsSettings;
@@ -351,12 +351,30 @@ test('?front=1 serves a spoofed-SNI, cert-pinned config when the edge is reachab
   assert.equal(out.streamSettings.wsSettings.host, 'edge.example.dev', 'Host stays real');
 });
 
-test('front falls back to the standard config when the pin probe fails', async (t) => {
+test('?front=ca serves a spoofed-SNI, CA-verified config with no probe', async (t) => {
+  // Stub returns null (edge unreachable) — ca must NOT depend on the probe.
+  const srv = await startFront(null);
+  t.after(() => srv.close());
+  const token = (await mintFront(srv.port, await login(srv.port), 'ca')).split('?')[0];
+
+  const { head, body } = await fetchOf(srv.port, `/i/${token}/conf.json?front=ca`);
+  assert.match(head, /filename="vless-alice-mitm\.json"/);
+
+  const out = JSON.parse(body.toString()).outbounds[0];
+  const tls = out.streamSettings.tlsSettings;
+  assert.equal(tls.serverName, 'www.microsoft.com', 'the SNI is spoofed');
+  assert.ok(tls.certificates[0].certificate.length > 10, 'CA block kept for the inspecting network');
+  assert.equal(tls.pinnedPeerCertSha256, undefined, 'no pin in ca mode');
+  assert.equal(out.settings.vnext[0].address, 'edge.example.dev', 'address stays real');
+  assert.equal(out.streamSettings.wsSettings.host, 'edge.example.dev', 'Host stays real');
+});
+
+test('front=pin falls back to the standard config when the pin probe fails', async (t) => {
   const srv = await startFront(null);   // edge unreachable -> get() resolves null
   t.after(() => srv.close());
-  const token = (await mintFront(srv.port, await login(srv.port))).split('?')[0];
+  const token = (await mintFront(srv.port, await login(srv.port), 'pin')).split('?')[0];
 
-  const { head, body } = await fetchOf(srv.port, `/i/${token}/conf.json?front=1`);
+  const { head, body } = await fetchOf(srv.port, `/i/${token}/conf.json?front=pin`);
   assert.match(head, /filename="vless-alice\.json"/, 'no -fronted suffix on fallback');
   const tls = JSON.parse(body.toString()).outbounds[0].streamSettings.tlsSettings;
   assert.equal(tls.serverName, 'edge.example.dev', 'standard SNI');
@@ -364,8 +382,8 @@ test('front falls back to the standard config when the pin probe fails', async (
   assert.equal(tls.pinnedPeerCertSha256, undefined);
 
   // Reveal a fresh invite to check the fallback note (the first burned its nonce).
-  const token2 = (await mintFront(srv.port, await login(srv.port))).split('?')[0];
-  const reveal = (await fetchOf(srv.port, `/i/${token2}/show?front=1`)).body.toString();
+  const token2 = (await mintFront(srv.port, await login(srv.port), 'pin')).split('?')[0];
+  const reveal = (await fetchOf(srv.port, `/i/${token2}/show?front=pin`)).body.toString();
   assert.match(reveal, /Fronting unavailable/, 'the invitee is told they got the standard profile');
 });
 
@@ -374,24 +392,26 @@ test('the front toggle rides the invite URL through every hop', async (t) => {
   t.after(() => srv.close());
   const cookie = await login(srv.port);
 
-  const tail = await mintFront(srv.port, cookie);
-  assert.match(tail, /\?front=1$/, 'the minted invite URL carries the toggle');
-  const token = tail.split('?')[0];
+  for (const mode of ['pin', 'ca']) {
+    const tail = await mintFront(srv.port, cookie, mode);
+    assert.match(tail, new RegExp(`\\?front=${mode}$`), `${mode}: the minted URL carries the mode`);
+    const token = tail.split('?')[0];
 
-  const landing = (await fetchOf(srv.port, `/i/${token}?front=1`)).body.toString();
-  assert.match(landing, /\/show\?front=1/, 'landing passes it on');
-  const reveal = (await fetchOf(srv.port, `/i/${token}/show?front=1`)).body.toString();
-  assert.match(reveal, /conf\.json\?front=1/, 'and the reveal page too');
+    const landing = (await fetchOf(srv.port, `/i/${token}?front=${mode}`)).body.toString();
+    assert.match(landing, new RegExp(`/show\\?front=${mode}`), `${mode}: landing passes it on`);
+    const reveal = (await fetchOf(srv.port, `/i/${token}/show?front=${mode}`)).body.toString();
+    assert.match(reveal, new RegExp(`conf\\.json\\?front=${mode}`), `${mode}: reveal too`);
+  }
 });
 
 test('front is inert when FRONT_SNI is not configured', async (t) => {
-  // Same ?front=1, but a server with no FRONT_SNI must serve the standard config
-  // and never advertise fronting.
+  // Same ?front=pin, but a server with no FRONT_SNI must serve the standard
+  // config and never advertise fronting.
   const srv = await start();
   t.after(() => srv.close());
   const token = await mint(srv.port, await login(srv.port));
 
-  const { head, body } = await fetchOf(srv.port, `/i/${token}/conf.json?front=1`);
+  const { head, body } = await fetchOf(srv.port, `/i/${token}/conf.json?front=pin`);
   assert.match(head, /filename="vless-alice\.json"/);
   assert.equal(JSON.parse(body.toString()).outbounds[0].streamSettings.tlsSettings.serverName,
     'edge.example.dev');

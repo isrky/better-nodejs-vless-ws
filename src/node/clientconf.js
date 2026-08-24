@@ -68,12 +68,20 @@ function buildXrayConfig({ uuid, host, port = 443, wsPath = '/', udpPolicy = 'no
   }
   rules.push({ network: 'udp', outboundTag: udp ? 'vless' : 'block' });
 
+  // Two fronting modes fall out of the arguments, so the builder needs no enum:
+  //   frontSni + pin -> spoofed SNI, cert pinned by fingerprint (for networks
+  //                     that do NOT inspect the front SNI).
+  //   frontSni alone -> spoofed SNI, but still CA-verified. A TLS-inspecting
+  //                     network mints a cert whose SAN matches the requested
+  //                     SNI and signs it with the interception CA the config
+  //                     already trusts, so verification passes with no pin.
+  //   neither        -> the normal config, serverName === host.
+  const sni = frontSni || host;
   let tlsSettings;
   if (frontSni && pinnedSha256) {
-    // Spoofed SNI, cert pinned by fingerprint rather than verified by name.
-    tlsSettings = { serverName: frontSni, pinnedPeerCertSha256: pinnedSha256 };
+    tlsSettings = { serverName: sni, pinnedPeerCertSha256: pinnedSha256 };
   } else {
-    tlsSettings = { serverName: host };
+    tlsSettings = { serverName: sni };
     if (pem && pem.length > 0) {
       tlsSettings.certificates = [{ usage: 'verify', certificate: pem.slice() }];
     }

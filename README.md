@@ -196,15 +196,24 @@ Setting `VPS_HOST` in `npm run creds` also makes `npm run configs` render UDP-ca
 
 Some networks filter HTTPS on the **SNI** in the TLS handshake and never cross-check it against the inner `Host` header. Because your VPS nginx routes by `Host`, you can send an **allowed** domain as the TLS SNI while the tunnel still reaches your real backend — so when `sync.isrky.dev` gets flagged, a fronted config keeps working without moving the server.
 
-Set **`FRONT_SNI`** in `npm run creds` to an allowed, high-reputation domain (e.g. `www.microsoft.com`, `chatgpt.com`). It must be a domain the network *allows* — this defeats an SNI blocklist, not an allowlist of a few big sites, so pick one those lists would never drop. Then:
+Set **`FRONT_SNI`** in `npm run creds` to an allowed, high-reputation domain (e.g. `www.microsoft.com`, `www.speedtest.net`). It must be a domain the network *allows* — this defeats an SNI blocklist, not an allowlist of a few big sites, so pick one those lists would never drop.
 
-- **Local files:** `npm run configs` renders `local/conf-vps-fronted.json` and `local/conf-android-vps-fronted.json`. The TLS `serverName` is the spoofed domain; `address` and the WS `Host` stay your real host; the cert is authenticated by **`pinnedPeerCertSha256`** (xray's replacement for the deprecated `allowInsecure`), which is **probed live** from your public edge at render time — no manual fingerprinting.
-- **Provisioned devices:** with `FRONT_SNI` in the container's `.env` (it flows there via `npm run creds:docker`), the operator can tick **Domain-front the SNI** when minting an invite, or append `?front=1`. The server self-probes its own edge for the pin and caches it; if the probe fails it serves the standard profile and says so.
+There are **two fronting modes**, one per network type — because how the cert is authenticated has to match what the network actually presents to the client:
 
-Two caveats:
+| mode | file / toggle | `serverName` | cert auth | for |
+|---|---|---|---|---|
+| **pinned** | `conf-vps-fronted.json` · `?front=pin` | spoofed | `pinnedPeerCertSha256` (real leaf, **probed live**) | networks that **don't** inspect TLS on your front SNI |
+| **CA-trust** | `conf-vps-mitm.json` · `?front=ca` | spoofed | `certificates` (the interception CA) | networks that **MITM** your front SNI (e.g. inside MEB) |
 
-- **The pin is of the leaf cert your edge serves for the spoofed SNI** (nginx's `default_server` cert). Let's Encrypt rotates it about every 60 days — the local files re-probe on every `npm run configs`, and the server re-probes on its own, but if you ever pin manually, refresh it after each renewal.
-- Fronting sets `pinnedPeerCertSha256`, which still cryptographically verifies you're reaching *your* server — it only stops verifying the (spoofed) hostname. It is Node/VPS-only; the Worker and Deno targets can't front to your backend.
+- **Pinned** pins the real leaf cert your edge serves, probed live (no manual fingerprinting) — `npm run configs` probes from your machine, the server self-probes and caches. On a TLS-inspecting network the middlebox swaps the cert, the pin won't match, and it fails — that's what CA-trust is for.
+- **CA-trust** keeps the certificate chain and trusts the interception CA (`INTERCEPT_CA`, default fatihca). A re-signing middlebox mints a cert whose name matches the spoofed SNI signed by that CA, so it verifies — no pin, no probe. Use it **only** on a network you already know inspects TLS: there the middlebox decrypts your tunnel regardless, so this is a *reachability* fallback, not a private one. Whenever you can find an allowed SNI that **isn't** inspected, prefer pinned — it keeps the tunnel unreadable.
+
+**Producing them:** `npm run configs` renders `conf-vps-fronted.json` + `-mitm.json` (and their `conf-android-*` twins) once `FRONT_SNI` is set; the CA-trust files render offline (no probe), the pinned ones only when the live probe succeeds. On the endpoint, with `FRONT_SNI` in the container's `.env` (it flows there via `npm run creds:docker`), the operator picks **None / Pinned / CA-trust** when minting an invite.
+
+Notes:
+
+- **Pinned rotates:** the pin is of the leaf your edge serves (nginx's `default_server` cert). Let's Encrypt rotates it ~60 days — the local files re-probe every `npm run configs` and the server re-probes on its own, so this is automatic unless you pin by hand.
+- Fronting is Node/VPS-only; the Worker and Deno targets can't front to your backend.
 
 ---
 
