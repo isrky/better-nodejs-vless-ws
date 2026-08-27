@@ -12,13 +12,15 @@ bugs — not a backup. Copy the store somewhere yourself.
 
 ## Generating values
 
-Run `npm run creds`, move to a field (`↑↓` or `j`/`k`), press `g` — the value
+Run `npm run creds`, switch to the field's tab (`←`/`→`, `h`/`l`, or `Tab`/`Shift+Tab`
+— one tab per group, plus `config` for the per-deployment fields), move to a
+field (`↑↓` or `j`/`k`), press `g` — the value
 is generated and written through on that single keypress. Prefer that over
 typing: a generated secret never exists outside the store and the redacted
 display. On a fresh store, `S` runs the quick setup instead: it generates
 every missing generatable field at once (UUID, WSPATH, and — after a `y` —
 ADMIN_TOKEN and PROVISION_SECRET), then walks you through the required
-hostnames.
+hostnames. The walk switches tabs to follow the field it is editing.
 
 For reference, `g` is equivalent to:
 
@@ -31,6 +33,22 @@ For reference, `g` is equivalent to:
 
 `PROVISION_SECRET_PREVIOUS` is the one secret `g` will not generate — it may
 only ever hold a value that was previously current.
+
+### Managing provisioned users
+
+On the `server` tab, Enter on `USERS` opens a list manager instead of the raw
+space-separated field. Use `a` to add a label, Enter or `r` to rename the
+selected label, and `d` to delete it; rename and delete both require a `y`
+confirmation because the old derived UUID stops authenticating after the next
+deployment. `D` (or `c` on the `USERS` dashboard row) confirms deleting the
+whole list. Every completed action writes through immediately and remains
+covered by the dashboard's one-step `u` undo.
+
+Labels are folded to lowercase and must match `[a-z0-9_-]`, start with a letter
+or digit, fit in 32 characters, and be unique. `owner` is reserved and the list
+is capped at 64 users. The manager never displays a derived UUID. User changes
+update the local store and encrypted payload; commit that payload and redeploy
+before the addition or revocation takes effect.
 
 Every generated secret is hex, so every one of them is URL-safe. That matters
 for `ADMIN_TOKEN` specifically: it is consumed as `/admin-stats?token=…`, and a
@@ -85,6 +103,34 @@ pushed.
 To roll back: `u` in the dashboard (or restore `credentials.json.bak`), then
 `npm run configs` and re-push. The configs are derived, so there is nothing
 else to restore.
+
+### Emergency rotation: the `nuke` tab
+
+The fifth, red `nuke` tab is the deliberate "assume these credentials leaked"
+path. It offers two actions and requires typing the exact uppercase word
+`NUKE` before either one writes anything:
+
+- **soft nuke** regenerates `UUID` and `WSPATH`, plus `ADMIN_TOKEN` and
+  `PROVISION_SECRET` when those optional features are already enabled. It keeps
+  the existing encryption-group keys and re-encrypts the committed payload.
+- **full nuke** makes the same credential changes, regenerates all three group
+  keys, and re-encrypts `src/node/secrets.enc.json` under them. It is available
+  only for the canonical store; a scratch `--store` cannot alter production
+  keys or ciphertext.
+
+Neither action enables an optional feature that was unset, and neither changes
+hosts, CA choices, `USERS`, or `PROXYIP`. When provisioning is enabled, the old
+`PROVISION_SECRET` becomes `PROVISION_SECRET_PREVIOUS` so already-issued users
+keep working during the transition; remove the previous value after reissuing
+them if the response requires immediate invalidation. An orphaned previous
+secret is cleared when there is no current provisioning secret to rotate.
+
+The full operation prepares every new value before writing and restores the
+store, its prior backup, the keyring, and the ciphertext if any write fails.
+After success the dashboard stays open on a redacted checklist: perform a full
+nuke from a network outside the tunnel, set the new group keys on all four
+platforms, commit and push the new ciphertext, redeploy as a coordinated
+cutover, then regenerate and re-import every client config.
 
 > [!NOTE]
 > **Rotating `ADMIN_TOKEN` does not log out live admin sessions** whenever
@@ -187,6 +233,12 @@ vars (`SECRETS_KEY_COMMON` plus `SECRETS_KEY_SERVER` or `SECRETS_KEY_EDGE`) and
 the committed ciphertext bundled into its build. A deployment therefore holds
 only keys, never the secret values.
 
+The dashboard mirrors this split: one tab per group (`common`, `server`,
+`edge`) plus a `config` tab for the per-deployment fields, so every field
+lives in exactly one tab and the tab bar counts each tab's problems. `K` from
+any dashboard tab confirms, exits the TUI, then prints all keys in paste-ready
+Fly, VPS/Docker, Worker, and Deno blocks.
+
 **Set up once:**
 
 ```bash
@@ -197,6 +249,12 @@ npm run creds:keys                        # reveal the two keys each platform ne
 Set each platform's two keys once — `fly secrets set SECRETS_KEY_COMMON=… SECRETS_KEY_SERVER=…`,
 `wrangler secret put SECRETS_KEY_COMMON` / `SECRETS_KEY_EDGE`, the Deno dashboard,
 the VPS `.env`. They do **not** change when you rotate a secret.
+
+`e` in the dashboard exports `local/deno.env` (common + edge) and
+`local/docker.env` (common + server). The equivalent commands are
+`npm run creds:env` and `npm run creds:docker`. These 0600 files contain only
+group keys; deployment config such as `PUBLIC_HOST`, `FRONT_SNI`, and `DOH_URL`
+must be added separately. Export refuses to write without the required keyring.
 
 **Change a secret afterwards:** edit it in `npm run creds` (the dashboard
 re-encrypts `secrets.enc.json` on every save), `git commit && git push`, then

@@ -62,7 +62,11 @@ function typeText(state, text, opts) {
   return state;
 }
 
-const at = (state, key) => ({ ...state, cursor: cs.FIELDS.findIndex((f) => f.key === key) });
+const at = (state, key) => ({
+  ...state,
+  cursor: cs.FIELDS.findIndex((f) => f.key === key),
+  tab: td.tabOfKey(key)
+});
 const lastMessage = (state) => state.messages[state.messages.length - 1]?.text || '';
 const visibleJson = (state) => JSON.stringify(td.visibleState(state));
 
@@ -94,14 +98,109 @@ test('an unhandled key is null, not fatal', () => {
   assert.equal(td.keymap(state, 'z', {}), null);
 });
 
-test('the cursor wraps around both ends of the list', () => {
-  const last = cs.FIELDS.length - 1;
+test('the cursor wraps around both ends of the active tab', () => {
   const state = init(tmpStore());
+  const uuid = cs.FIELDS.findIndex((f) => f.key === 'UUID');
+  const wspath = cs.FIELDS.findIndex((f) => f.key === 'WSPATH');
 
-  // k on the first field lands on the last.
-  assert.equal(step(state, { type: 'MOVE', delta: -1 }).cursor, last);
-  // j on the last field lands on the first.
-  assert.equal(step({ ...state, cursor: last }, { type: 'MOVE', delta: 1 }).cursor, 0);
+  // The common tab holds UUID and WSPATH only: k on UUID wraps to WSPATH and
+  // j on WSPATH back to UUID — never into another group's fields.
+  assert.equal(step(state, { type: 'MOVE', delta: -1 }).cursor, wspath);
+  assert.equal(step({ ...state, cursor: wspath }, { type: 'MOVE', delta: 1 }).cursor, uuid);
+});
+
+// ---------- the group tabs ----------
+
+test('the tabs are one per group plus config and nuke, and data tabs partition every field', () => {
+  const state = init(tmpStore());
+  assert.deepEqual(td.visibleState(state).tabs.map((t) => t.name),
+    [...Object.keys(cs.GROUPS), 'config', 'nuke']);
+
+  // Each tab lists exactly its own fields; across all tabs every field
+  // appears exactly once.
+  const seen = [];
+  for (const tab of td.TABS.filter((name) => name !== 'nuke')) {
+    const rows = td.visibleState({ ...state, tab }).activeGroup.rows;
+    for (const f of cs.FIELDS) {
+      const expected = td.tabOfKey(f.key) === tab;
+      assert.equal(rows.some((r) => r.key === f.key), expected,
+        `${f.key} is ${expected ? 'missing from' : 'does not belong on'} the ${tab} tab`);
+    }
+    seen.push(...rows.map((r) => r.key));
+  }
+  assert.deepEqual(seen.sort(), cs.FIELDS.map((f) => f.key).sort());
+  assert.equal(td.visibleState({ ...state, tab: 'nuke' }).activeGroup, null,
+    'the action tab has no credential rows');
+
+  // The tab bar counts each tab's problems, so a broken field is visible
+  // from every tab — here the empty store misses all four required fields,
+  // three of which are render/config, one is common.
+  const empty = init({ storePath: '/tmp/none.json', store: cs.emptyStore() });
+  const counts = Object.fromEntries(td.visibleState(empty).tabs.map((t) => [t.name, t.problems]));
+  assert.equal(counts.common, 2, 'UUID and WSPATH are required');
+  assert.equal(counts.config, 2, 'FLY_HOST and WORKER_HOST are required');
+  assert.equal(counts.server, 0);
+});
+
+test('tab, shift-tab, arrows and h/l switch tabs; they stay text in the editor', () => {
+  const state = init(tmpStore());
+  assert.deepEqual(td.keymap(state, '', { tab: true }), { type: 'TAB_MOVE', delta: 1 });
+  assert.deepEqual(td.keymap(state, '', { tab: true, shift: true }), { type: 'TAB_MOVE', delta: -1 });
+  assert.deepEqual(td.keymap(state, 'h', {}), { type: 'TAB_MOVE', delta: -1 });
+  assert.deepEqual(td.keymap(state, 'l', {}), { type: 'TAB_MOVE', delta: 1 });
+  assert.deepEqual(td.keymap(state, '', { leftArrow: true }), { type: 'TAB_MOVE', delta: -1 });
+  assert.deepEqual(td.keymap(state, '', { rightArrow: true }), { type: 'TAB_MOVE', delta: 1 });
+
+  // Inside the editor h/l are literal characters and tab is still ignored.
+  const editing = step(at(state, 'FLY_HOST'), { type: 'OPEN_EDIT' });
+  assert.deepEqual(td.keymap(editing, 'h', {}), { type: 'INPUT_CHAR', text: 'h' });
+  assert.equal(td.keymap(editing, '', { tab: true }), null);
+});
+
+test('switching tabs lands on the tab\'s fields and remembers where you were', () => {
+  let state = init(tmpStore());
+  assert.equal(state.tab, 'common');
+  assert.equal(cs.FIELDS[state.cursor].key, 'UUID');
+
+  state = step(state, { type: 'MOVE', delta: 1 });         // onto WSPATH
+  state = step(state, { type: 'TAB_MOVE', delta: 1 });     // server
+  assert.equal(state.tab, 'server');
+  assert.equal(cs.FIELDS[state.cursor].key, 'ADMIN_TOKEN');
+
+  state = step(state, { type: 'MOVE', delta: 1 });         // PROVISION_SECRET
+  state = step(state, { type: 'TAB_MOVE', delta: 1 });     // edge
+  assert.equal(cs.FIELDS[state.cursor].key, 'PROXYIP');
+
+  state = step(state, { type: 'TAB_MOVE', delta: -1 });    // back to server
+  assert.equal(cs.FIELDS[state.cursor].key, 'PROVISION_SECRET', 'server restores its cursor');
+
+  state = step(state, { type: 'TAB_MOVE', delta: -1 });    // back to common
+  assert.equal(cs.FIELDS[state.cursor].key, 'WSPATH', 'common restores its cursor');
+
+  // The tabs wrap: left of common is nuke, then config.
+  state = step(state, { type: 'TAB_MOVE', delta: -1 });
+  assert.equal(state.tab, 'nuke');
+  state = step(state, { type: 'TAB_MOVE', delta: -1 });
+  assert.equal(state.tab, 'config');
+  assert.equal(cs.FIELDS[state.cursor].key, 'FLY_HOST');
+});
+
+test('opening a field switches to its tab, so the setup walk follows along', () => {
+  const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'tui-')), 'credentials.json');
+  const store = cs.emptyStore();
+  cs.writeStore(p, store);
+  const ctx = { storePath: p, store };
+
+  let state = init(ctx);
+  state = step(state, td.enrich(state, { type: 'SETUP_START' }, cs.generate), { ctx });
+  state = step(state, { type: 'SETUP_SECRETS', yes: false }, { ctx });
+
+  assert.equal(state.edit.key, 'FLY_HOST');
+  assert.equal(state.tab, 'config', 'the walk visibly follows the field across tabs');
+
+  // A direct OPEN_EDIT lands on the field's tab too.
+  const opened = step(at(state, 'PROXYIP'), { type: 'OPEN_EDIT' });
+  assert.equal(opened.tab, 'edge');
 });
 
 test('the help bar only advertises what the highlighted field supports', () => {
@@ -114,6 +213,7 @@ test('the help bar only advertises what the highlighted field supports', () => {
   assert.ok(!/g generate/.test(sni), 'FRONT_SNI cannot be generated');
   assert.ok(!/c clear/.test(sni), 'an unset field has nothing to clear');
   assert.match(sni, /enter edit/);
+  assert.match(sni, /←→\/hl tabs/, 'the tab hint is always advertised');
 
   // UUID: generatable but required -> g, no c.
   const uuid = bar('UUID');
@@ -196,12 +296,36 @@ test('up arrow loads the current value into the editor to edit in place', () => 
 
   state = step(state, { type: 'LOAD_CURRENT' });
   assert.equal(state.edit.buffer, 'fly.example.dev', 'the stored value is pulled in');
+  assert.equal(state.edit.caret, state.edit.buffer.length, 'the caret follows the loaded value');
 
   // fix a typo and submit, without retyping the whole host
   state = step(state, { type: 'BACKSPACE' });
   state = typeText(state, 'v');
   state = step(state, { type: 'SUBMIT' }, { ctx });
   assert.equal(cs.readStore(ctx.storePath).credentials.FLY_HOST, 'fly.example.dev'.slice(0, -1) + 'v');
+});
+
+test('the editor inserts and deletes at a movable caret', () => {
+  let state = at(init(tmpStore()), 'FLY_HOST');
+  state = step(state, { type: 'OPEN_EDIT' });
+  state = typeText(state, 'ac');
+  state = step(state, { type: 'MOVE_CARET', delta: -1 });
+  state = typeText(state, 'b');
+  assert.equal(state.edit.buffer, 'abc');
+  assert.equal(state.edit.caret, 2);
+
+  state = step(state, { type: 'MOVE_CARET', to: 'home' });
+  state = step(state, { type: 'DELETE_FORWARD' });
+  assert.equal(state.edit.buffer, 'bc');
+  state = step(state, { type: 'MOVE_CARET', to: 'end' });
+  state = step(state, { type: 'BACKSPACE' });
+  assert.deepEqual({ buffer: state.edit.buffer, caret: state.edit.caret }, { buffer: 'b', caret: 1 });
+
+  assert.deepEqual(td.keymap(state, '', { leftArrow: true }), { type: 'MOVE_CARET', delta: -1 });
+  assert.deepEqual(td.keymap(state, '', { rightArrow: true }), { type: 'MOVE_CARET', delta: 1 });
+  assert.deepEqual(td.keymap(state, '', { home: true }), { type: 'MOVE_CARET', to: 'home' });
+  assert.deepEqual(td.keymap(state, '', { end: true }), { type: 'MOVE_CARET', to: 'end' });
+  assert.deepEqual(td.keymap(state, '', { delete: true }), { type: 'DELETE_FORWARD' });
 });
 
 test('up arrow on an unset field is a no-op, and j stays a literal character', () => {
@@ -245,6 +369,97 @@ test('a required field refuses to be cleared, an optional one clears through', (
   state = step(state, { type: 'CLEAR_FIELD' }, { ctx, effects });
   assert.equal(effects.length, 1);
   assert.equal('ADMIN_TOKEN' in cs.readStore(ctx.storePath).credentials, false);
+});
+
+// ---------- user manager ----------
+
+test('USERS opens a list manager and add writes a normalized label immediately', () => {
+  const ctx = tmpStore({ PROVISION_SECRET: 'provision-secret' });
+  let state = at(init(ctx), 'USERS');
+  state = step(state, { type: 'OPEN_EDIT' });
+  assert.equal(state.mode, 'users');
+  assert.equal(td.visibleState(state).userManager.count, 0);
+  assert.deepEqual(td.keymap(state, 'a', {}), { type: 'USERS_ADD' });
+
+  state = step(state, { type: 'USERS_ADD' });
+  for (const ch of ' Alice ') state = step(state, { type: 'USERS_INPUT', text: ch });
+  const effects = [];
+  state = step(state, { type: 'USERS_SUBMIT' }, { ctx, effects });
+
+  assert.equal(state.users.view, 'list');
+  assert.equal(cs.readStore(ctx.storePath).credentials.USERS, 'alice');
+  assert.equal(effects[0].type, 'write-store');
+  assert.match(lastMessage(state), /commit and redeploy/);
+});
+
+test('user add rejects reserved, duplicate and malformed labels', () => {
+  const ctx = tmpStore({ USERS: 'alice' });
+  let state = step(at(init(ctx), 'USERS'), { type: 'OPEN_EDIT' });
+
+  for (const bad of ['owner', 'alice', 'not valid']) {
+    state = step(state, { type: 'USERS_ADD' });
+    for (const ch of bad) state = step(state, { type: 'USERS_INPUT', text: ch });
+    state = step(state, { type: 'USERS_SUBMIT' });
+    assert.equal(state.users.view, 'input');
+    assert.ok(state.users.draft.error, bad);
+    state = step(state, { type: 'USERS_CANCEL' });
+  }
+  assert.equal(ctx.store.credentials.USERS, 'alice');
+});
+
+test('the user manager refuses additions at the runtime registry limit', () => {
+  const labels = Array.from({ length: cs.maxUserLabels() }, (_, index) => `u${index}`);
+  const ctx = tmpStore({ USERS: labels.join(' ') });
+  let state = step(at(init(ctx), 'USERS'), { type: 'OPEN_EDIT' });
+  state = step(state, { type: 'USERS_ADD' });
+  assert.equal(state.users.view, 'list');
+  assert.match(state.users.error, /maximum 64/);
+});
+
+test('rename confirms before replacing the label in place', () => {
+  const ctx = tmpStore({ USERS: 'alice bob' });
+  let state = step(at(init(ctx), 'USERS'), { type: 'OPEN_EDIT' });
+  state = step(state, { type: 'USERS_MOVE', delta: 1 });
+  state = step(state, { type: 'USERS_RENAME' });
+  assert.deepEqual({ buffer: state.users.draft.buffer, caret: state.users.draft.caret }, { buffer: 'bob', caret: 3 });
+  state = step(state, { type: 'USERS_CLEAR_INPUT' });
+  for (const ch of 'carol') state = step(state, { type: 'USERS_INPUT', text: ch });
+  state = step(state, { type: 'USERS_SUBMIT' });
+  assert.equal(state.users.view, 'confirm');
+  assert.equal(cs.readStore(ctx.storePath).credentials.USERS, 'alice bob', 'submit only opens confirmation');
+
+  const effects = [];
+  state = step(state, { type: 'USERS_CONFIRM', yes: true }, { ctx, effects });
+  assert.equal(cs.readStore(ctx.storePath).credentials.USERS, 'alice carol');
+  assert.equal(state.users.cursor, 1);
+  assert.match(lastMessage(state), /revoke the old identity/);
+  assert.equal(effects.length, 1);
+});
+
+test('delete and delete-all confirm, with the last deletion unsetting USERS', () => {
+  const ctx = tmpStore({ USERS: 'alice bob' });
+  let state = step(at(init(ctx), 'USERS'), { type: 'OPEN_EDIT' });
+  state = step(state, { type: 'USERS_DELETE' });
+  state = step(state, { type: 'USERS_CONFIRM', yes: false });
+  assert.equal(cs.readStore(ctx.storePath).credentials.USERS, 'alice bob');
+
+  state = step(state, { type: 'USERS_DELETE' });
+  state = step(state, { type: 'USERS_CONFIRM', yes: true }, { ctx });
+  assert.equal(cs.readStore(ctx.storePath).credentials.USERS, 'bob');
+
+  state = step(state, { type: 'USERS_CLEAR_ALL' });
+  state = step(state, { type: 'USERS_CONFIRM', yes: true }, { ctx });
+  assert.equal('USERS' in cs.readStore(ctx.storePath).credentials, false);
+  assert.equal(td.visibleState(state).userManager.count, 0);
+});
+
+test('dashboard c on USERS requires a delete-all confirmation', () => {
+  const ctx = tmpStore({ USERS: 'alice bob' });
+  let state = at(init(ctx), 'USERS');
+  state = step(state, { type: 'CLEAR_FIELD' }, { ctx });
+  assert.equal(state.mode, 'users');
+  assert.equal(state.users.confirm.kind, 'clear');
+  assert.equal(cs.readStore(ctx.storePath).credentials.USERS, 'alice bob');
 });
 
 test('PROVISION_SECRET_PREVIOUS cannot be generated', () => {
@@ -341,6 +556,110 @@ test('the CA select opens on the current state', () => {
   assert.equal(td.visibleState(state).caSelect.options[1].current, true);
 });
 
+// ---------- emergency rotation ----------
+
+test('the nuke tab is danger-styled and offers soft and full actions', () => {
+  const state = { ...init(tmpStore()), tab: 'nuke' };
+  const vs = td.visibleState(state);
+  const tab = vs.tabs.find((item) => item.name === 'nuke');
+  assert.equal(tab.danger, true);
+  assert.equal(tab.active, true);
+  assert.deepEqual(vs.nuke.choices.map((choice) => choice.name), ['soft', 'full']);
+  assert.equal(vs.nuke.choices[1].disabled, true, 'tmp/custom stores cannot rotate canonical keys');
+
+  assert.deepEqual(td.keymap(state, '', { return: true }), { type: 'NUKE_OPEN' });
+  const opened = step(state, { type: 'NUKE_OPEN' });
+  assert.equal(opened.mode, 'nuke-confirm');
+  assert.equal(opened.nuke.kind, 'soft');
+});
+
+test('nuke requires exact uppercase confirmation and supports editing/cancel', () => {
+  let state = { ...init(tmpStore()), tab: 'nuke' };
+  state = step(state, { type: 'NUKE_OPEN' });
+  for (const ch of 'nuke') state = step(state, td.keymap(state, ch, {}));
+  state = step(state, td.enrich(state, td.keymap(state, '', { return: true }), () => 'unused'));
+  assert.equal(state.mode, 'nuke-confirm');
+  assert.match(state.nuke.error, /exactly/);
+
+  assert.deepEqual(td.keymap(state, '', { backspace: true }), { type: 'NUKE_BACKSPACE' });
+  assert.deepEqual(td.keymap(state, '', { escape: true }), { type: 'NUKE_CANCEL' });
+  state = step(state, { type: 'NUKE_CANCEL' });
+  assert.equal(state.mode, 'dashboard');
+  assert.equal(state.nuke, null);
+});
+
+test('soft nuke rotates active credentials and rolls provisioning current into previous', () => {
+  const ctx = tmpStore({
+    ADMIN_TOKEN: 'old-admin',
+    PROVISION_SECRET: 'old-provision',
+    PROVISION_SECRET_PREVIOUS: 'older-provision',
+    USERS: 'alice bob',
+    PROXYIP: 'proxy.example.dev'
+  });
+  let state = { ...init(ctx), tab: 'nuke' };
+  state = step(state, { type: 'NUKE_OPEN' });
+  state = { ...state, nuke: { ...state.nuke, input: 'NUKE' } };
+  const action = td.enrich(state, { type: 'NUKE_SUBMIT' }, (key) => `new-${key}`);
+  const effects = [];
+  state = step(state, action, { effects });
+
+  assert.equal(state.mode, 'nuke-running');
+  assert.equal(state.store.credentials.UUID, 'new-UUID');
+  assert.equal(state.store.credentials.WSPATH, 'new-WSPATH');
+  assert.equal(state.store.credentials.ADMIN_TOKEN, 'new-ADMIN_TOKEN');
+  assert.equal(state.store.credentials.PROVISION_SECRET, 'new-PROVISION_SECRET');
+  assert.equal(state.store.credentials.PROVISION_SECRET_PREVIOUS, 'old-provision');
+  assert.equal(state.store.credentials.USERS, 'alice bob');
+  assert.equal(state.store.credentials.PROXYIP, 'proxy.example.dev');
+  assert.equal(effects[0].type, 'nuke');
+  assert.equal(effects[0].kind, 'soft');
+
+  state = step(state, { type: 'NUKE_OK', keyringGroups: ['common'], encrypted: true });
+  assert.equal(state.mode, 'nuke-done');
+  assert.equal(td.visibleState(state).nuke.done.kind, 'soft');
+  assert.ok(!visibleJson(state).includes('new-ADMIN_TOKEN'));
+});
+
+test('nuke preserves unset optional features and clears an orphaned previous secret', () => {
+  const ctx = tmpStore({ PROVISION_SECRET_PREVIOUS: 'orphaned-secret' });
+  let state = { ...init(ctx), tab: 'nuke' };
+  state = step(state, { type: 'NUKE_OPEN' });
+  state = { ...state, nuke: { ...state.nuke, input: 'NUKE' } };
+  state = step(state, td.enrich(state, { type: 'NUKE_SUBMIT' }, (key) => `new-${key}`));
+  assert.equal('ADMIN_TOKEN' in state.store.credentials, false);
+  assert.equal('PROVISION_SECRET' in state.store.credentials, false);
+  assert.equal('PROVISION_SECRET_PREVIOUS' in state.store.credentials, false);
+});
+
+test('full nuke is blocked on custom stores and enabled for the canonical context', () => {
+  let custom = { ...init(tmpStore()), tab: 'nuke', nukeCursor: 1 };
+  custom = step(custom, { type: 'NUKE_OPEN' });
+  assert.equal(custom.mode, 'dashboard');
+  assert.match(lastMessage(custom), /custom --store/);
+
+  const ctx = tmpStore();
+  let canonical = td.initState({
+    ...ctx, tab: 'nuke', canFullNuke: true,
+    keyringGroups: Object.keys(cs.GROUPS)
+  }, deps);
+  canonical = { ...canonical, tab: 'nuke', nukeCursor: 1 };
+  canonical = step(canonical, { type: 'NUKE_OPEN' });
+  assert.equal(canonical.mode, 'nuke-confirm');
+  assert.equal(canonical.nuke.kind, 'full');
+});
+
+test('a failed nuke restores reducer state and stays on the confirmation', () => {
+  const ctx = tmpStore({ ADMIN_TOKEN: 'old-admin' });
+  let state = { ...init(ctx), tab: 'nuke' };
+  state = step(state, { type: 'NUKE_OPEN' });
+  state = { ...state, nuke: { ...state.nuke, input: 'NUKE' } };
+  state = step(state, td.enrich(state, { type: 'NUKE_SUBMIT' }, (key) => `new-${key}`));
+  state = step(state, { type: 'NUKE_FAILED', message: 'disk full', rollback: ctx.store });
+  assert.equal(state.mode, 'nuke-confirm');
+  assert.equal(state.store.credentials.ADMIN_TOKEN, 'old-admin');
+  assert.equal(state.nuke.error, 'disk full');
+});
+
 // ---------- reveal ----------
 
 test('the reveal is gated: cancel prints nothing, confirm exits to print', () => {
@@ -368,35 +687,49 @@ test('the reveal is gated: cancel prints nothing, confirm exits to print', () =>
   assert.ok(!visibleJson(confirmed).includes(ctx.store.credentials.UUID));
 });
 
-test('K reveals the group keys only when a keyring exists, printing after teardown', () => {
+test('K reveals the complete keyring from every dashboard tab, printing after teardown', () => {
   const ctx = tmpStore();
+  const groups = Object.keys(cs.GROUPS);
 
-  // no keyring → K is a hint, not a modal
-  let noKeys = td.initState({ store: ctx.store, storePath: ctx.storePath, hasKeyring: false }, deps);
-  assert.deepEqual(td.keymap(noKeys, 'K', {}), { type: 'KEYS_OPEN' });
+  // No keyring: no advertised action and no modal.
+  let noKeys = td.initState({ store: ctx.store, storePath: ctx.storePath, keyringGroups: [] }, deps);
+  assert.ok(!td.visibleState(noKeys).helpBar.includes('K all keys'));
   noKeys = step(noKeys, { type: 'KEYS_OPEN' });
   assert.equal(noKeys.mode, 'dashboard');
   assert.match(lastMessage(noKeys), /--init-keys/);
-  assert.ok(!td.visibleState(noKeys).helpBar.includes('K keys'), 'no K hint without a keyring');
 
-  // with a keyring → confirm modal, then exit-to-print
-  let withKeys = td.initState({ store: ctx.store, storePath: ctx.storePath, hasKeyring: true }, deps);
-  assert.ok(td.visibleState(withKeys).helpBar.includes('K keys'), 'K hint shown with a keyring');
-  withKeys = step(withKeys, { type: 'KEYS_OPEN' });
-  assert.equal(withKeys.mode, 'keys-confirm');
-  assert.equal(td.visibleState(withKeys).keysConfirm, true);
+  // A partial keyring refuses to print any subset.
+  const partial = td.initState({ store: ctx.store, storePath: ctx.storePath, keyringGroups: ['common'] }, deps);
+  const partialOpen = step(partial, { type: 'KEYS_OPEN' });
+  assert.equal(partialOpen.mode, 'dashboard');
+  assert.match(lastMessage(partialOpen), /missing server, edge/);
 
-  // any non-y cancels; the keys never appear in a frame (nothing to leak here,
-  // but the modal holds no key material regardless)
+  // A complete keyring makes K global, including config and the nuke tab.
+  const base = td.initState({ store: ctx.store, storePath: ctx.storePath, keyringGroups: groups }, deps);
+  for (const tab of td.TABS) {
+    const onTab = { ...base, tab };
+    assert.deepEqual(td.keymap(onTab, 'K', {}), { type: 'KEYS_OPEN' }, `${tab} maps K`);
+    assert.match(td.visibleState(onTab).helpBar, /K all keys/, `${tab} advertises K`);
+    const opened = step(onTab, { type: 'KEYS_OPEN' });
+    assert.equal(opened.mode, 'keys-confirm', `${tab} opens the confirmation`);
+    const confirm = td.visibleState(opened).keysConfirm;
+    assert.deepEqual(confirm.groups, groups);
+    assert.deepEqual(confirm.platforms, ['fly', 'docker', 'wrangler', 'deno']);
+  }
+
+  let withKeys = step(base, { type: 'KEYS_OPEN' });
+
+  // any non-y cancels; the keys never appear in a frame
   assert.deepEqual(td.keymap(withKeys, 'n', {}), { type: 'KEYS_CANCEL' });
   const cancelled = step(withKeys, { type: 'KEYS_CANCEL' });
   assert.equal(cancelled.mode, 'dashboard');
   assert.equal(cancelled.exit, null);
 
+  // y hands all printing to the post-teardown step.
   const effects = [];
   const confirmed = step(withKeys, { type: 'KEYS_CONFIRM' }, { effects });
   assert.deepEqual(effects, [{ type: 'exit', code: 0 }]);
-  assert.equal(confirmed.exit.post, 'keys');
+  assert.deepEqual(confirmed.exit, { code: 0, post: 'keys' });
 });
 
 test('reveal with nothing pushable reports instead of prompting', () => {
@@ -520,17 +853,29 @@ test('no secret value ever reaches anything the components render', () => {
   cs.writeStore(p, store);
 
   let state = init({ storePath: p, store });
-  // Walk it through every renderable mode.
-  const states = [state];
+  // Walk it through every renderable mode — and every tab, since only the
+  // active tab's fields reach a frame.
+  const states = [];
+  let walk = state;
+  for (let i = 0; i < td.TABS.length; i++) {
+    states.push(walk);
+    walk = step(walk, { type: 'TAB_MOVE', delta: 1 });
+  }
   states.push(step(at(state, 'ADMIN_TOKEN'), { type: 'OPEN_EDIT' }));
   states.push(step(at(state, 'INTERCEPT_CA_FILE'), { type: 'OPEN_EDIT' }));
   states.push(step(state, { type: 'REVEAL_OPEN' }));
+  const withKeyring = td.initState({
+    store, storePath: p, keyringGroups: Object.keys(cs.GROUPS)
+  }, deps);
+  states.push(step(withKeyring, { type: 'KEYS_OPEN' }));
 
   for (const s of states) {
     const text = visibleJson(s);
+    const shown = td.visibleState(s).activeGroup?.rows.map((r) => r.key) || [];
     for (const f of cs.FIELDS) {
-      assert.ok(f.key === 'INTERCEPT_CA_FILE' || text.includes(`"${f.key}"`) || text.includes(f.key),
-        `${f.key} must appear in the dashboard`);
+      if (shown.includes(f.key)) {
+        assert.ok(text.includes(f.key), `${f.key} must appear in its tab`);
+      }
       if (f.secret) {
         assert.ok(!text.includes(`SENTINEL-${f.key}-VALUE`), `${f.key} leaked into a frame`);
       }

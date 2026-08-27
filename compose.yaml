@@ -1,7 +1,8 @@
 # Dockge stack for the Node build. Clone this repo as the stack directory
 # (e.g. /opt/stacks/vless-ws) and put the secrets in .env next to this file —
-# `npm run creds:docker` on your machine writes local/docker.env to paste into
-# Dockge's env editor. Updates: git pull, then rebuild the stack.
+# `npm run creds:docker` on your machine writes the two SECRETS_KEY_* values to
+# local/docker.env for Dockge's env editor. Add PUBLIC_HOST, FRONT_SNI and other
+# deployment config separately. Updates: git pull, then rebuild the stack.
 #
 # nginx runs on the host and terminates TLS, so the port is published on
 # loopback only. Outbound UDP relays use ephemeral source ports, so default

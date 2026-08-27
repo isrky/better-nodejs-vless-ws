@@ -18,10 +18,12 @@ const ROOT = path.resolve(__dirname, '..');
 
 let cm;
 let cs;
+let ce;
 
 test.before(async () => {
   cm = await import('../tools/credentials.mjs');
   cs = await import('../tools/credstore.mjs');
+  ce = await import('../tools/credsecrets.mjs');
 });
 
 function tmpStore() {
@@ -64,6 +66,22 @@ test('the confirmation prompt names keys and platforms but no values', () => {
   for (const f of cs.FIELDS) {
     if (f.secret) assert.ok(!text.includes(`SENTINEL-${f.key}-VALUE`), `${f.key} leaked into the prompt`);
   }
+});
+
+test('the key reveal prints paste-ready two-line blocks for every platform', () => {
+  const keys = ce.generateKeys();
+  const text = cm.formatKeysReveal(keys);
+  const section = (from, to) => text.slice(text.indexOf(from), to ? text.indexOf(to) : undefined);
+  const fly = section('Fly', 'VPS / Docker');
+  const docker = section('VPS / Docker', 'Cloudflare Worker');
+  const worker = section('Cloudflare Worker', 'Deno Deploy');
+  const deno = section('Deno Deploy');
+
+  assert.ok(fly.includes(`SECRETS_KEY_COMMON=${keys.common}\nSECRETS_KEY_SERVER=${keys.server}`));
+  assert.ok(docker.includes(`SECRETS_KEY_COMMON=${keys.common}\nSECRETS_KEY_SERVER=${keys.server}`));
+  assert.ok(worker.includes(`SECRETS_KEY_COMMON=${keys.common}\nSECRETS_KEY_EDGE=${keys.edge}`));
+  assert.ok(deno.includes(`SECRETS_KEY_COMMON=${keys.common}\nSECRETS_KEY_EDGE=${keys.edge}`));
+  assert.ok(!/^\s+SECRETS_KEY_/m.test(text), 'assignment lines have no indentation and can be pasted as dotenv');
 });
 
 test('the reveal prints each secret under the right platform', () => {
@@ -169,60 +187,85 @@ test('the reveal is gated: n prints nothing, y prints the values', async () => {
   assert.ok(yes.said.includes(ctx.store.credentials.UUID), 'answering y must print the value');
 });
 
-test('exportDenoEnv writes a 0600 deno.env with only the deno vars and prints no secret', () => {
+test('exportDenoEnv writes only Deno\'s two group keys at 0600', () => {
   const ctx = tmpStore();
+  const keyringPath = path.join(path.dirname(ctx.storePath), 'secrets.keys.json');
+  const keys = ce.generateKeys();
+  ce.writeKeyring(keys, keyringPath);
   const said = [];
-  cm.exportDenoEnv(ctx.store, ctx.storePath, (s) => said.push(String(s)));
+  cm.exportDenoEnv(ctx.storePath, (s) => said.push(String(s)), keyringPath);
 
   const envPath = path.join(path.dirname(ctx.storePath), 'deno.env');
   assert.ok(fs.existsSync(envPath), 'deno.env is written');
   assert.equal((fs.statSync(envPath).mode & 0o777).toString(8), '600', 'mode is 0600');
 
   const text = fs.readFileSync(envPath, 'utf8');
-  assert.match(text, /^UUID=00000000-0000-4000-8000-000000000001$/m);
-  assert.match(text, /^WSPATH=\/test-ws-path$/m);
-  assert.ok(!text.includes('FLY_HOST'), 'only the deno vars are exported');
+  assert.equal(text, `SECRETS_KEY_COMMON=${keys.common}\nSECRETS_KEY_EDGE=${keys.edge}\n`);
+  assert.ok(!text.includes(ctx.store.credentials.UUID), 'no decrypted credential is exported');
+  assert.ok(!text.includes('WSPATH'), 'only group keys are exported');
 
   // The announcement carries the path and key names but never the secret itself.
   const announced = said.join('\n');
   assert.ok(!announced.includes(ctx.store.credentials.UUID), 'no secret printed to the terminal');
-  assert.match(announced, /wrote .*deno\.env \(UUID, WSPATH\)/);
+  assert.ok(!announced.includes(keys.common), 'no group key is printed to the terminal');
+  assert.match(announced, /wrote .*deno\.env \(SECRETS_KEY_COMMON, SECRETS_KEY_EDGE\)/);
 });
 
-test('the exports report nothing to export when no vars are set', () => {
+test('the exports require a keyring and write nothing when it is missing', () => {
   const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'creds-')), 'credentials.json');
   const store = cs.emptyStore();
   cs.writeStore(p, store);
+  const missing = path.join(path.dirname(p), 'missing.keys.json');
 
   const said = [];
-  cm.exportDenoEnv(store, p, (s) => said.push(String(s)));
-  cm.exportDockerEnv(store, p, (s) => said.push(String(s)));
-  assert.match(said.join('\n'), /nothing to export/);
+  cm.exportDenoEnv(p, (s) => said.push(String(s)), missing);
+  cm.exportDockerEnv(p, (s) => said.push(String(s)), missing);
+  assert.match(said.join('\n'), /--init-keys/);
   assert.ok(!fs.existsSync(path.join(path.dirname(p), 'deno.env')), 'no file is written');
   assert.ok(!fs.existsSync(path.join(path.dirname(p), 'docker.env')), 'no file is written');
 });
 
-test('exportDockerEnv writes a 0600 docker.env with VPS_HOST renamed to PUBLIC_HOST', () => {
+test('exportDockerEnv writes only Docker\'s two group keys at 0600', () => {
   const ctx = tmpStore();
   const withHost = cs.withField(ctx.store, 'VPS_HOST', 'vps.example.dev');
   cs.writeStore(ctx.storePath, withHost);
+  const keyringPath = path.join(path.dirname(ctx.storePath), 'secrets.keys.json');
+  const keys = ce.generateKeys();
+  ce.writeKeyring(keys, keyringPath);
   const said = [];
-  cm.exportDockerEnv(withHost, ctx.storePath, (s) => said.push(String(s)));
+  cm.exportDockerEnv(ctx.storePath, (s) => said.push(String(s)), keyringPath);
 
   const envPath = path.join(path.dirname(ctx.storePath), 'docker.env');
   assert.ok(fs.existsSync(envPath), 'docker.env is written');
   assert.equal((fs.statSync(envPath).mode & 0o777).toString(8), '600', 'mode is 0600');
 
   const text = fs.readFileSync(envPath, 'utf8');
-  assert.match(text, /^UUID=00000000-0000-4000-8000-000000000001$/m);
-  assert.match(text, /^WSPATH=\/test-ws-path$/m);
-  assert.match(text, /^PUBLIC_HOST=vps\.example\.dev$/m, 'exported under the name the server reads');
-  assert.ok(!text.includes('VPS_HOST'), 'the store key itself never appears');
-  assert.ok(!text.includes('FLY_HOST'), 'only the docker vars are exported');
+  assert.equal(text, `SECRETS_KEY_COMMON=${keys.common}\nSECRETS_KEY_SERVER=${keys.server}\n`);
+  assert.ok(!text.includes(withHost.credentials.UUID), 'no decrypted credential is exported');
+  assert.ok(!text.includes('PUBLIC_HOST'), 'deployment config is no longer part of the key export');
 
   const announced = said.join('\n');
-  assert.ok(!announced.includes(ctx.store.credentials.UUID), 'no secret printed to the terminal');
-  assert.match(announced, /wrote .*docker\.env \(UUID, WSPATH, VPS_HOST\)/);
+  assert.ok(!announced.includes(keys.server), 'no group key is printed to the terminal');
+  assert.match(announced, /wrote .*docker\.env \(SECRETS_KEY_COMMON, SECRETS_KEY_SERVER\)/);
+});
+
+test('the combined TUI export validates the complete keyring before writing either file', () => {
+  const ctx = tmpStore();
+  const keyringPath = path.join(path.dirname(ctx.storePath), 'secrets.keys.json');
+  const keys = ce.generateKeys();
+  ce.writeKeyring({ common: keys.common, edge: keys.edge }, keyringPath);
+  const said = [];
+
+  assert.equal(cm.exportKeyEnvs(ctx.storePath, (s) => said.push(String(s)), keyringPath), null);
+  assert.match(said.join('\n'), /missing server/);
+  assert.ok(!fs.existsSync(path.join(path.dirname(ctx.storePath), 'deno.env')));
+  assert.ok(!fs.existsSync(path.join(path.dirname(ctx.storePath), 'docker.env')));
+
+  ce.writeKeyring(keys, keyringPath);
+  const paths = cm.exportKeyEnvs(ctx.storePath, () => {}, keyringPath);
+  assert.equal(paths.length, 2);
+  assert.ok(fs.existsSync(path.join(path.dirname(ctx.storePath), 'deno.env')));
+  assert.ok(fs.existsSync(path.join(path.dirname(ctx.storePath), 'docker.env')));
 });
 
 test('printFrontPin probes and prints FRONT_CERT_PIN plus the cert description', async () => {

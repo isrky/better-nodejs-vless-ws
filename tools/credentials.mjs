@@ -17,7 +17,10 @@
 // exists only in memory is precisely what you cannot recover.
 
 import { createInterface } from 'node:readline/promises';
-import { existsSync, readFileSync, renameSync } from 'node:fs';
+import {
+  existsSync, readFileSync, renameSync, writeFileSync, unlinkSync,
+  statSync, chmodSync
+} from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -27,7 +30,7 @@ import {
   emptyStore, readStore, writeStore, storeMode, withField,
   redact, validateStore,
   parseLegacyEnv, planImport, pushPlan, publicHostWarnings, platformNames,
-  serializeEnv, writeEnvFile, PLATFORM_GROUPS
+  writeEnvFile, PLATFORM_GROUPS
 } from './credstore.mjs';
 
 import {
@@ -45,8 +48,8 @@ const USAGE = `manage the credentials in local/credentials.json
   npm run creds                    interactive dashboard (S = quick setup)
   npm run creds:status             redacted report (never prompts)
   npm run creds:push               show the secrets, grouped by dashboard
-  npm run creds:env                write local/deno.env for Deno Deploy import
-  npm run creds:docker             write local/docker.env for the VPS compose stack
+  npm run creds:env                export Deno's two group keys to local/deno.env
+  npm run creds:docker             export Docker's two group keys to local/docker.env
   npm run creds:pin                print FRONT_CERT_PIN for the VPS .env (probes the edge)
   npm run creds:encrypt            re-encrypt the store into src/node/secrets.enc.json
   npm run creds:decrypt            rebuild the local store from the committed file + keyring
@@ -107,7 +110,7 @@ export function renderMenu(store, storePath = DEFAULT_STORE_PATH) {
 
   lines.push('');
   lines.push('   r  render the configs      p  reveal secrets to paste');
-  lines.push('   e  export env files        f  print front cert pin');
+  lines.push('   e  export group-key envs   f  print front cert pin');
   lines.push('   u  undo last change        q  quit');
   lines.push('');
   return lines.join('\n');
@@ -268,48 +271,75 @@ export async function revealWithConfirmation(store, ask, out) {
 }
 
 /**
- * Write the Deno-Deploy env vars to a 0600 `deno.env` next to the store, for the
- * dashboard's bulk `.env` import.
+ * Write one platform's group keys as a 0600 dotenv file next to the store.
  *
- * Unlike the reveal, this writes to a file rather than the terminal, so it never
- * prints a secret — it announces the path and the key names only, which is why
- * it needs no confirmation and is safe off a TTY. The file lives in the same
- * gitignored dir the rendered configs already do, so it is not a new leak class.
- *
- * @returns the path written, or null when nothing is set.
+ * The values stay in the gitignored local directory and only the path/key names
+ * are announced. The encrypted payload now carries the credentials themselves,
+ * so exports deliberately contain no UUID/WSPATH/server values or deployment
+ * config — only the two keys that target needs to decrypt its groups.
  */
-export function exportDenoEnv(store, storePath, out) {
-  const keys = pushPlan(store).deno;
-  if (!keys.length) {
-    out('  nothing to export — set UUID and WSPATH first');
+const requiredGroups = (platforms) =>
+  [...new Set(platforms.flatMap((platform) => PLATFORM_GROUPS[platform] || []))];
+
+const missingGroups = (keys, platforms) =>
+  requiredGroups(platforms).filter((group) => !keys?.[group]);
+
+function requireKeyring(keyringPath, platforms, out) {
+  const keys = readKeyring(keyringPath);
+  if (!keys) {
+    out('  no keyring — run: node tools/credentials.mjs --init-keys');
     return null;
   }
-  const path = resolve(dirname(storePath), 'deno.env');
-  writeEnvFile(path, serializeEnv(store, keys));
-  out(`  wrote ${path.replace(ROOT + '/', '')} (${keys.join(', ')})`);
-  out(dim('  upload it in the Deno Deploy dashboard, or paste its contents into the env import'));
+  const missing = missingGroups(keys, platforms);
+  if (missing.length) {
+    out(`  keyring is missing ${missing.join(', ')} — re-run --init-keys --force to replace it`);
+    return null;
+  }
+  return keys;
+}
+
+function writePlatformKeyEnv(platform, filename, storePath, keys, out, guidance) {
+  const entries = platformKeys(platform, keys);
+  const path = resolve(dirname(storePath), filename);
+  const text = entries.map(({ envName, value }) => `${envName}=${value}`).join('\n') + '\n';
+  writeEnvFile(path, text);
+  out(`  wrote ${path.replace(ROOT + '/', '')} (${entries.map(({ envName }) => envName).join(', ')})`);
+  out(dim(guidance));
   return path;
 }
 
-/**
- * Same contract as exportDenoEnv, for the VPS compose stack: writes the
- * server-side env to a 0600 `docker.env`, announcing the path and key names
- * only. VPS_HOST lands in the file as PUBLIC_HOST (the field's exportAs) —
- * the env name the server actually reads.
- *
- * @returns the path written, or null when nothing is set.
- */
-export function exportDockerEnv(store, storePath, out) {
-  const keys = pushPlan(store).docker;
-  if (!keys.length) {
-    out('  nothing to export — set UUID and WSPATH first');
-    return null;
-  }
-  const path = resolve(dirname(storePath), 'docker.env');
-  writeEnvFile(path, serializeEnv(store, keys));
-  out(`  wrote ${path.replace(ROOT + '/', '')} (${keys.join(', ')})`);
-  out(dim('  paste its contents into the Dockge stack\'s .env editor (TRUST_PROXY is set by compose.yaml)'));
-  return path;
+export function exportDenoEnv(storePath, out, keyringPath = DEFAULT_KEYRING_PATH) {
+  const keys = requireKeyring(keyringPath, ['deno'], out);
+  if (!keys) return null;
+  return writePlatformKeyEnv(
+    'deno', 'deno.env', storePath, keys, out,
+    '  upload it in the Deno Deploy dashboard, or paste its contents into the env import'
+  );
+}
+
+export function exportDockerEnv(storePath, out, keyringPath = DEFAULT_KEYRING_PATH) {
+  const keys = requireKeyring(keyringPath, ['docker'], out);
+  if (!keys) return null;
+  return writePlatformKeyEnv(
+    'docker', 'docker.env', storePath, keys, out,
+    "  paste its contents into the Dockge stack's .env editor; add deployment config separately"
+  );
+}
+
+/** Export both dashboard files after validating the complete keyring once. */
+export function exportKeyEnvs(storePath, out, keyringPath = DEFAULT_KEYRING_PATH) {
+  const keys = requireKeyring(keyringPath, ['deno', 'docker'], out);
+  if (!keys) return null;
+  const paths = [];
+  paths.push(writePlatformKeyEnv(
+    'deno', 'deno.env', storePath, keys, out,
+    '  upload it in the Deno Deploy dashboard, or paste its contents into the env import'
+  ));
+  paths.push(writePlatformKeyEnv(
+    'docker', 'docker.env', storePath, keys, out,
+    "  paste its contents into the Dockge stack's .env editor; add deployment config separately"
+  ));
+  return paths;
 }
 
 /**
@@ -389,32 +419,95 @@ export function syncSecretsFile(store, keyringPath = DEFAULT_KEYRING_PATH, fileP
   return filePath;
 }
 
+const fileSnapshot = (path) => existsSync(path)
+  ? { data: readFileSync(path), mode: statSync(path).mode & 0o777 }
+  : null;
+
+function restoreSnapshot(path, snapshot) {
+  if (!snapshot) {
+    if (existsSync(path)) unlinkSync(path);
+    return;
+  }
+  writeFileSync(path, snapshot.data);
+  chmodSync(path, snapshot.mode);
+}
+
 /**
- * The group keys, grouped by the platform that needs each pair, with the
- * set-once command per platform. These ARE secrets, so callers gate printing
- * behind a confirmation exactly like the credential reveal.
+ * Commit a soft or full emergency rotation without ever returning key material.
+ * Every output is prepared before the first write. If a later write fails, the
+ * original store, backup, keyring and ciphertext are restored byte-for-byte.
+ */
+export function commitCredentialNuke(store, {
+  kind,
+  storePath = DEFAULT_STORE_PATH,
+  keyringPath = DEFAULT_KEYRING_PATH,
+  secretsFilePath = SECRETS_FILE_PATH,
+  canonicalStorePath = DEFAULT_STORE_PATH,
+  io = { writeStore, writeKeyring, writeSecretsFile }
+} = {}) {
+  if (kind !== 'soft' && kind !== 'full') throw new StoreError(`unknown nuke kind ${kind}`);
+  if (kind === 'full' && storePath !== canonicalStorePath) {
+    throw new StoreError('full nuke is disabled for a custom --store');
+  }
+
+  const keys = kind === 'full' ? generateKeys() : readKeyring(keyringPath);
+  const encrypted = storePath === canonicalStorePath && keys ? encryptStore(store, keys) : null;
+  const paths = [storePath, storePath + '.bak'];
+  if (kind === 'full') paths.push(keyringPath);
+  if (encrypted) paths.push(secretsFilePath);
+  const snapshots = new Map(paths.map((path) => [path, fileSnapshot(path)]));
+
+  try {
+    io.writeStore(storePath, store);
+    if (kind === 'full') io.writeKeyring(keys, keyringPath);
+    if (encrypted) io.writeSecretsFile(encrypted, secretsFilePath);
+  } catch (error) {
+    const rollbackErrors = [];
+    for (const path of [...paths].reverse()) {
+      try {
+        restoreSnapshot(path, snapshots.get(path));
+      } catch (rollbackError) {
+        rollbackErrors.push(`${path}: ${rollbackError.message}`);
+      }
+    }
+    if (rollbackErrors.length) {
+      error.message += `; rollback also failed (${rollbackErrors.join('; ')})`;
+    }
+    throw error;
+  }
+
+  return { keyringGroups: keys ? Object.keys(keys) : [], encrypted: Boolean(encrypted) };
+}
+
+// Keep each platform's two assignments contiguous so the block can be copied
+// as dotenv text. Guidance follows the block instead of interrupting it.
+const KEY_GUIDANCE = {
+  fly: 'paste these two secrets into Fly',
+  docker: "paste this block into the Dockge stack's .env",
+  wrangler: 'add these two secrets to the Cloudflare Worker',
+  deno: 'paste this block into the Deno Deploy environment import'
+};
+const PLATFORM_TITLES = {
+  fly: 'Fly', docker: 'VPS / Docker', wrangler: 'Cloudflare Worker', deno: 'Deno Deploy'
+};
+
+/**
+ * The group keys, grouped into contiguous dotenv blocks for each platform.
+ * These ARE secrets, so callers gate printing behind a confirmation exactly
+ * like the credential reveal.
  */
 export function formatKeysReveal(keys, only = null) {
-  const how = {
-    fly: (n) => `fly secrets set ${n}=…`,
-    docker: (n) => `add ${n}=… to the Dockge stack's .env`,
-    wrangler: (n) => `wrangler secret put ${n}`,
-    deno: (n) => `set ${n} in the Deno Deploy dashboard`
-  };
-  const title = {
-    fly: 'Fly', docker: 'VPS / Docker', wrangler: 'Cloudflare Worker', deno: 'Deno Deploy'
-  };
-
+  const platforms = only ? [only] : Object.keys(PLATFORM_GROUPS);
+  const missing = missingGroups(keys, platforms);
+  if (missing.length) return ['', `error: keyring is missing ${missing.join(', ')}; nothing printed`, ''].join('\n');
   const out = ['', 'Group keys — set each ONCE per platform.',
     dim('  They do not change when you rotate a secret; only a key rotation re-sets them.'), ''];
 
   for (const platform of Object.keys(PLATFORM_GROUPS)) {
     if (only && platform !== only) continue;
-    out.push(bold(title[platform]));
-    for (const { envName, value } of platformKeys(platform, keys)) {
-      out.push(`  ${envName}=${value}`);
-      out.push(dim(`    ${how[platform](envName)}`));
-    }
+    out.push(bold(PLATFORM_TITLES[platform]));
+    for (const { envName, value } of platformKeys(platform, keys)) out.push(`${envName}=${value}`);
+    out.push(dim(`  ${KEY_GUIDANCE[platform]}`));
     out.push('');
   }
   return out.join('\n');
@@ -438,6 +531,8 @@ async function main(argv) {
   const storePath = argValue(argv, '--store')
     ? resolve(process.cwd(), argValue(argv, '--store'))
     : DEFAULT_STORE_PATH;
+  const keyringPath = argValue(argv, '--keyring') || DEFAULT_KEYRING_PATH;
+  const secretsFilePath = argValue(argv, '--secrets-file') || SECRETS_FILE_PATH;
 
   if (argv.includes('--push')) {
     const store = loadStoreOrEmpty(storePath);
@@ -472,15 +567,13 @@ async function main(argv) {
 
   if (argv.includes('--deno-env')) {
     // Writes a file, never prints a secret, so it is safe off a TTY.
-    const store = loadStoreOrEmpty(storePath);
-    const path = exportDenoEnv(store, storePath, (s) => console.log(s));
+    const path = exportDenoEnv(storePath, (s) => console.log(s), keyringPath);
     return path ? 0 : 1;
   }
 
   if (argv.includes('--docker-env')) {
     // Same file-only contract as --deno-env.
-    const store = loadStoreOrEmpty(storePath);
-    const path = exportDockerEnv(store, storePath, (s) => console.log(s));
+    const path = exportDockerEnv(storePath, (s) => console.log(s), keyringPath);
     return path ? 0 : 1;
   }
 
@@ -490,9 +583,6 @@ async function main(argv) {
     const pin = await printFrontPin(store, (s) => console.log(s));
     return pin ? 0 : 1;
   }
-
-  const keyringPath = argValue(argv, '--keyring') || DEFAULT_KEYRING_PATH;
-  const secretsFilePath = argValue(argv, '--secrets-file') || SECRETS_FILE_PATH;
 
   if (argv.includes('--init-keys')) {
     // Generating a keyring over an existing one would orphan every value already
@@ -544,6 +634,11 @@ async function main(argv) {
     if (!keys) { console.error('error: no keyring — run: node tools/credentials.mjs --init-keys'); return 1; }
     const only = argValue(argv, '--keys') && PLATFORM_GROUPS[argValue(argv, '--keys')]
       ? argValue(argv, '--keys') : null;
+    const missing = missingGroups(keys, only ? [only] : Object.keys(PLATFORM_GROUPS));
+    if (missing.length) {
+      console.error(`error: keyring is missing ${missing.join(', ')}; refusing to print a partial set`);
+      return 1;
+    }
 
     if (argv.includes('--yes')) { console.log(formatKeysReveal(keys, only)); return 0; }
     if (!process.stdin.isTTY) {

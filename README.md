@@ -179,7 +179,7 @@ cd /opt/stacks
 git clone https://github.com/you/better-nodejs-vless-ws vless-ws
 ```
 
-Secrets go in a `.env` next to `compose.yaml` (gitignored) — `cp .env.example .env` for a commented template. On your own machine, `npm run creds:docker` writes `local/docker.env` with exactly the keys the container reads — `UUID`, `WSPATH`, `ADMIN_TOKEN`, `PROVISION_SECRET`, `USERS`, and `PUBLIC_HOST` (from the store's `VPS_HOST`) — paste its contents into Dockge's env editor, then start the stack. Optionally add `DOH_URL=` there too (deployment config rather than a credential, same as `fly.toml`'s `[env]` block). Updating is `git pull` + rebuild in Dockge; the container drains connections for up to 25 s on stop instead of hard-cutting live tunnels.
+Secrets go in a `.env` next to `compose.yaml` (gitignored) — `cp .env.example .env` for a commented template. On your own machine, `npm run creds:docker` writes `local/docker.env` containing only `SECRETS_KEY_COMMON` and `SECRETS_KEY_SERVER`; paste those into Dockge's env editor so the container can decrypt the bundled secret payload. Add `PUBLIC_HOST`, `FRONT_SNI`, `DOH_URL`, and other deployment config separately. Updating is `git pull` + rebuild in Dockge; the container drains connections for up to 25 s on stop instead of hard-cutting live tunnels.
 
 With `PUBLIC_HOST` and `ADMIN_TOKEN` set, the startup banner (visible in `docker logs` / Dockge) prints the real dashboard URL — `https://<PUBLIC_HOST>/admin-stats?token=<ADMIN_TOKEN>` — instead of the container's bind address.
 
@@ -210,7 +210,7 @@ There are **two fronting modes**, one per network type — because how the cert 
 - **Pinned** pins the real leaf cert your edge serves, probed live (no manual fingerprinting) — `npm run configs` probes from your machine, the server self-probes and caches. On a TLS-inspecting network the middlebox swaps the cert, the pin won't match, and it fails — that's what CA-trust is for.
 - **CA-trust** keeps the certificate chain and trusts the interception CA (`INTERCEPT_CA`, default fatihca). A re-signing middlebox mints a cert whose name matches the spoofed SNI signed by that CA, so it verifies — no pin, no probe. Use it **only** on a network you already know inspects TLS: there the middlebox decrypts your tunnel regardless, so this is a *reachability* fallback, not a private one. Whenever you can find an allowed SNI that **isn't** inspected, prefer pinned — it keeps the tunnel unreadable.
 
-**Producing them:** `npm run configs` renders `conf-vps-fronted.json` + `-mitm.json` (and their `conf-android-*` twins) once `FRONT_SNI` is set; the CA-trust files render offline (no probe), the pinned ones only when the live probe succeeds. On the endpoint, with `FRONT_SNI` in the container's `.env` (it flows there via `npm run creds:docker`), the operator picks **None / Pinned / CA-trust** when minting an invite.
+**Producing them:** `npm run configs` renders `conf-vps-fronted.json` + `-mitm.json` (and their `conf-android-*` twins) once `FRONT_SNI` is set; the CA-trust files render offline (no probe), the pinned ones only when the live probe succeeds. On the endpoint, add `FRONT_SNI` separately to the container's `.env`; it is deployment config and is not included by `npm run creds:docker`. The operator then picks **None / Pinned / CA-trust** when minting an invite.
 
 **If the server can't probe its own edge:** a container often can't reach its host's public IP (no NAT hairpin), so the server's self-probe fails and `?front=pin` quietly falls back to the standard config. Feed it the pin instead: run `npm run creds:pin` (dashboard key **f**) from your machine — it probes the edge, prints the cert it sees (so you can confirm it's *your* cert, not an interceptor's), and outputs a ready line:
 
@@ -267,6 +267,12 @@ fly secrets set PUBLIC_HOST=edge.example.com
 ```
 
 Then open `/admin-stats/provision`, pick a user, and send them the link. It expires in 15 minutes.
+
+To manage the list interactively, run `npm run creds`, open the `server` tab,
+and press Enter on `USERS`. The list view supports add, rename, and delete;
+rename/delete confirmations call out that the old derived credential is revoked
+after the encrypted payload is committed and redeployed. Derived UUIDs are never
+shown in the credential TUI.
 
 **What the invitee gets.** The landing page carries no credential — chat apps fetch pasted URLs to build previews, and burning the invite there would kill it before the human taps. Tapping through reveals a `vless://` link (one tap into v2rayNG, Streisand, Hiddify or NekoBox), a QR of it, and a **full JSON config download**. The download exists because a share link structurally cannot carry a certificate: on a [TLS-intercepting network](#networks-that-intercept-tls) only the JSON works.
 
@@ -564,13 +570,13 @@ deno install -Arf jsr:@deno/deployctl
 # 2. Run it locally to smoke-test (reads UUID/WSPATH/etc. from the environment)
 UUID=<your-uuid> WSPATH=/<your-path> deno task start   # serves on http://localhost:8000
 
-# 3. Deploy (set env vars in the Deno Deploy dashboard: UUID, WSPATH, PROXYIP, DOH_URL)
+# 3. Deploy (set SECRETS_KEY_COMMON + SECRETS_KEY_EDGE; add DOH_URL separately if wanted)
 deno task deploy
 ```
 
-`UUID` is the only credential and has **no default** — until it is set, every request gets the decoy page and nothing is proxied, exactly as on the Worker. Set `UUID`, `WSPATH`, and optionally `PROXYIP`/`DOH_URL` as environment variables in the project's settings (`DOH_URL` defaults to Cloudflare's resolver).
+`UUID` is the only credential and has **no default** — until it is available, every request gets the decoy page and nothing is proxied, exactly as on the Worker. Prefer the two group keys so Deno decrypts `UUID`, `WSPATH`, and optional `PROXYIP` from the bundled payload. `DOH_URL` remains separate deployment config and defaults to Cloudflare's resolver. Direct plaintext variables remain a legacy fallback when no `SECRETS_KEY_*` variable is set.
 
-To set them in one step instead of typing each by hand, run **`npm run creds:env`** (or press `e` in `npm run creds`). It writes `local/deno.env` — a `KEY=value` file holding `UUID`, `WSPATH`, and `PROXYIP` (whichever are set) — which you upload, or paste, into the Deno Deploy dashboard's environment-variable import. The file is `0600` and lives in the gitignored `local/` dir; it prints only the path, never the secrets.
+To set them in one step instead of typing each by hand, run **`npm run creds:env`** (or press `e` in `npm run creds`). It writes `local/deno.env` with only `SECRETS_KEY_COMMON` and `SECRETS_KEY_EDGE`, which let Deno decrypt `UUID`, `WSPATH`, and `PROXYIP` from the bundled encrypted payload. Upload or paste it into the Deno Deploy environment import. The file is `0600` and lives in the gitignored `local/` dir; the command prints only its path and key names, never their values.
 
 ### Client Configuration
 

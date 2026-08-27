@@ -16,3 +16,6 @@ restrictions/
 # The compose env file on a VPS — secrets, never committed. The repo itself
 # holds no .env; `npm run creds:docker` writes local/docker.env to paste in.
 .env
+
+# Local AI-tooling scratch dir, not part of the project.
+.commandcode/

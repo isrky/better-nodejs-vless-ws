@@ -136,6 +136,14 @@ test('validateField catches the failures that would otherwise be silent', () => 
   assert.equal(cs.validateField('NOT_A_FIELD', 'anything'), null, 'unmanaged keys are carried, not judged');
 });
 
+test('single user labels share the runtime parser rules', () => {
+  assert.deepEqual(cs.validateUserLabel(' Alice '), { label: 'alice', error: null });
+  assert.match(cs.validateUserLabel('owner').error, /reserved/);
+  assert.match(cs.validateUserLabel('two users').error, /lowercase letters/);
+  assert.deepEqual(cs.parseUserLabels('Alice,bob').labels, ['alice', 'bob']);
+  assert.equal(cs.maxUserLabels(), 64);
+});
+
 test('validateStore reports every problem at once', () => {
   const problems = cs.validateStore(cs.emptyStore()).map((p) => p.key);
   assert.deepEqual(problems.sort(), ['FLY_HOST', 'UUID', 'WORKER_HOST', 'WSPATH']);

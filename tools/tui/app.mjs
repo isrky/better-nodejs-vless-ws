@@ -3,15 +3,28 @@
 // executes what reduce() only described. All I/O funnels through the `io`
 // object so a test can hand in stubs; the defaults are the same helpers the
 // CLI flags use, with their output redirected into the message bar.
-import { useReducer, useEffect, useRef } from 'react';
-import { useApp, useInput } from 'ink';
+import { useReducer, useEffect, useRef, useState } from 'react';
+import { useApp, useInput, useStdout } from 'ink';
 import { html } from './h.mjs';
 import { initState, reduce, keymap, enrich, visibleState } from './reducer.mjs';
 import { writeStore, restoreBackup, DEFAULT_STORE_PATH } from '../credstore.mjs';
-import { exportDenoEnv, exportDockerEnv, printFrontPin, syncSecretsFile } from '../credentials.mjs';
-import { Ui } from './components.mjs';
+import {
+  exportKeyEnvs, printFrontPin, syncSecretsFile,
+  commitCredentialNuke
+} from '../credentials.mjs';
+import { Ui, terminalTooSmall } from './components.mjs';
 
-const defaultIo = { writeStore, restoreBackup, exportDenoEnv, exportDockerEnv, printFrontPin, syncSecretsFile };
+const defaultIo = {
+  writeStore, restoreBackup, exportKeyEnvs, printFrontPin,
+  syncSecretsFile, commitCredentialNuke
+};
+
+export function terminalViewport(stdout) {
+  return {
+    columns: Math.max(1, Number(stdout?.columns) || 80),
+    rows: Math.max(1, Number(stdout?.rows) || 24)
+  };
+}
 
 // Effects are appended with a sequence number and executed exactly once, so
 // React re-running the reducer or re-rendering cannot double-write the store.
@@ -22,17 +35,25 @@ function wrappedReducer(w, action) {
   return { state, seq: seq + effects.length, queue: [...w.queue, ...effects.map((eff) => ({ ...eff, seq: ++seq }))] };
 }
 
-export function App({ store, storePath, pathLabel, hasKeyring, result, io: ioProp }) {
+export function App({ store, storePath, pathLabel, keyringGroups, result, io: ioProp }) {
   const { exit } = useApp();
+  const { stdout } = useStdout();
   const io = ioProp || defaultIo;
+  const [viewport, setViewport] = useState(() => terminalViewport(stdout));
 
-  const [w, dispatch] = useReducer(wrappedReducer, { store, storePath, pathLabel, hasKeyring }, (init) => ({
+  const [w, dispatch] = useReducer(wrappedReducer, { store, storePath, pathLabel, keyringGroups }, (init) => ({
     state: initState(init), queue: [], seq: 0
   }));
 
   const stateRef = useRef(w.state);
   stateRef.current = w.state;
   const ran = useRef(0);
+
+  useEffect(() => {
+    const resize = () => setViewport(terminalViewport(stdout));
+    stdout?.on?.('resize', resize);
+    return () => stdout?.off?.('resize', resize);
+  }, [stdout]);
 
   async function runEffect(eff) {
     const log = (line, level) => dispatch({ type: 'LOG', text: String(line), level });
@@ -64,12 +85,17 @@ export function App({ store, storePath, pathLabel, hasKeyring, result, io: ioPro
           dispatch({ type: 'UNDO_FAILED', message: e.message });
         }
         break;
+      case 'nuke':
+        try {
+          const committed = io.commitCredentialNuke(eff.store, { kind: eff.kind, storePath });
+          dispatch({ type: 'NUKE_OK', ...committed });
+        } catch (e) {
+          dispatch({ type: 'NUKE_FAILED', message: e.message, rollback: eff.rollback });
+        }
+        break;
       case 'export-envs':
         try {
-          log('deno.env — Deno Deploy', 'dim');
-          io.exportDenoEnv(stateRef.current.store, storePath, log);
-          log('docker.env — VPS compose stack', 'dim');
-          io.exportDockerEnv(stateRef.current.store, storePath, log);
+          io.exportKeyEnvs(storePath, log);
         } catch (e) {
           log(e.message, 'error');
         }
@@ -103,9 +129,14 @@ export function App({ store, storePath, pathLabel, hasKeyring, result, io: ioPro
   });
 
   useInput((input, key) => {
+    if (terminalTooSmall(viewport)) {
+      if (key.ctrl && input === 'c') dispatch({ type: 'INTERRUPT' });
+      else if (input === 'q') dispatch({ type: 'QUIT' });
+      return;
+    }
     const action = enrich(stateRef.current, keymap(stateRef.current, input, key));
     if (action) dispatch(action);
   });
 
-  return html`<${Ui} vs=${visibleState(w.state)} />`;
+  return html`<${Ui} vs=${visibleState(w.state)} viewport=${viewport} />`;
 }

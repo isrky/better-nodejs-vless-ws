@@ -59,6 +59,26 @@ function users() {
   return (lazy.users ||= require(resolve(ROOT, 'src/node/users.js')));
 }
 
+/** Canonical parser used by both the runtime and the interactive manager. */
+export function parseUserLabels(raw) {
+  return users().parseUserLabels(raw);
+}
+
+/** Validate one CRUD input without treating separators as several users. */
+export function validateUserLabel(raw) {
+  const label = String(raw || '').trim().toLowerCase();
+  if (!label) return { label, error: 'label is empty' };
+  if (label === users().LEGACY_LABEL) return { label, error: 'owner is reserved' };
+  if (!users().isValidLabel(label)) {
+    return { label, error: 'use 1–32 lowercase letters, digits, _ or -' };
+  }
+  return { label, error: null };
+}
+
+export function maxUserLabels() {
+  return users().MAX_USERS;
+}
+
 // ==========================================
 // Schema
 // ==========================================

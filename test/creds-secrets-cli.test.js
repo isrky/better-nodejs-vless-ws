@@ -121,8 +121,10 @@ test('--keys --yes prints each platform its two group keys', () => {
   assert.match(r.stdout, /SECRETS_KEY_SERVER=/);
   assert.match(r.stdout, /SECRETS_KEY_EDGE=/);
   assert.ok(r.stdout.includes(keys.common), 'the deliberate reveal shows the key');
-  assert.match(r.stdout, /fly secrets set/);
-  assert.match(r.stdout, /wrangler secret put/);
+  assert.match(r.stdout, /Fly[\s\S]*SECRETS_KEY_COMMON=.*\nSECRETS_KEY_SERVER=/,
+    'Fly receives one contiguous two-line block');
+  assert.match(r.stdout, /Cloudflare Worker[\s\S]*SECRETS_KEY_COMMON=.*\nSECRETS_KEY_EDGE=/,
+    'Worker receives one contiguous two-line block');
 });
 
 test('--keys fly --yes narrows to just that platform', () => {
@@ -139,4 +141,41 @@ test('--encrypt without a keyring points the user at --init-keys', () => {
   const r = run(['--encrypt', ...paths(s)]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /--init-keys/);
+});
+
+test('--keys refuses to print an incomplete keyring', () => {
+  const s = scratch();
+  assert.equal(run(['--init-keys', ...paths(s)]).status, 0);
+  const parsed = JSON.parse(fs.readFileSync(s.keyring, 'utf8'));
+  delete parsed.keys.edge;
+  fs.writeFileSync(s.keyring, JSON.stringify(parsed));
+
+  const r = run(['--keys', '--yes', ...paths(s)]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /missing edge/);
+  assert.ok(!/SECRETS_KEY_COMMON=/.test(r.stdout), 'no partial set is printed');
+});
+
+test('--deno-env and --docker-env export only each platform\'s group keys', () => {
+  const s = scratch();
+  assert.equal(run(['--init-keys', ...paths(s)]).status, 0);
+  const keys = JSON.parse(fs.readFileSync(s.keyring, 'utf8')).keys;
+
+  const deno = run(['--deno-env', ...paths(s)]);
+  assert.equal(deno.status, 0, deno.stderr);
+  assert.equal(fs.readFileSync(path.join(s.dir, 'deno.env'), 'utf8'),
+    `SECRETS_KEY_COMMON=${keys.common}\nSECRETS_KEY_EDGE=${keys.edge}\n`);
+
+  const docker = run(['--docker-env', ...paths(s)]);
+  assert.equal(docker.status, 0, docker.stderr);
+  assert.equal(fs.readFileSync(path.join(s.dir, 'docker.env'), 'utf8'),
+    `SECRETS_KEY_COMMON=${keys.common}\nSECRETS_KEY_SERVER=${keys.server}\n`);
+});
+
+test('--deno-env fails without its required keyring and writes nothing', () => {
+  const s = scratch();
+  const r = run(['--deno-env', ...paths(s)]);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /--init-keys/);
+  assert.equal(fs.existsSync(path.join(s.dir, 'deno.env')), false);
 });

@@ -8,11 +8,17 @@ import { h } from './h.mjs';
 import { App } from './app.mjs';
 import { readKeyring } from '../credsecrets.mjs';
 
+export const TUI_RENDER_OPTIONS = Object.freeze({ exitOnCtrlC: false, alternateScreen: true });
+
 export async function runTui({ storePath, store, pathLabel }) {
   const result = { code: 0, post: null, store };
-  const hasKeyring = readKeyring() !== null;
+  // Only the group NAMES cross into the TUI — the key material itself stays
+  // out of the reducer state, exactly like every other secret.
+  const keyring = readKeyring();
+  const keyringGroups = keyring ? Object.keys(keyring) : [];
   const instance = render(
-    h(App, { storePath, store, pathLabel, hasKeyring, result }), { exitOnCtrlC: false }
+    h(App, { storePath, store, pathLabel, keyringGroups, result }),
+    TUI_RENDER_OPTIONS
   );
   await instance.waitUntilExit();
 
