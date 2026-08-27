@@ -12,8 +12,13 @@ bugs — not a backup. Copy the store somewhere yourself.
 
 ## Generating values
 
-Run `npm run creds`, pick a field, press `g`. Prefer that over typing: a
-generated secret is never echoed to your terminal and never enters scrollback.
+Run `npm run creds`, move to a field (`↑↓` or `j`/`k`), press `g` — the value
+is generated and written through on that single keypress. Prefer that over
+typing: a generated secret never exists outside the store and the redacted
+display. On a fresh store, `S` runs the quick setup instead: it generates
+every missing generatable field at once (UUID, WSPATH, and — after a `y` —
+ADMIN_TOKEN and PROVISION_SECRET), then walks you through the required
+hostnames.
 
 For reference, `g` is equivalent to:
 
@@ -65,7 +70,7 @@ pushed.
 > tunnel**, or you can lose access to the Fly and Cloudflare dashboards midway.
 
 1. Copy `local/credentials.json` somewhere safe.
-2. `npm run creds` → pick the field → `g`. Edits are written through
+2. `npm run creds` → highlight the field → `g`. Edits are written through
    immediately, so there is nothing to save and quitting is always safe.
 3. `npm run configs` — validates before writing, so a malformed value stops here
    rather than becoming a config that `xray -test` accepts and the server rejects.
@@ -77,7 +82,7 @@ pushed.
    UUID and the phone fails with no useful error.
 6. `npm run configs:check` — exit 0 means disk matches the store.
 
-To roll back: `u` in the menu (or restore `credentials.json.bak`), then
+To roll back: `u` in the dashboard (or restore `credentials.json.bak`), then
 `npm run configs` and re-push. The configs are derived, so there is nothing
 else to restore.
 
@@ -119,7 +124,7 @@ you lose a credential.
 ### The CA has three states, not a value
 
 `INTERCEPT_CA_FILE` is the one field where "blank" would be ambiguous, so the
-menu offers three named choices instead:
+dashboard offers three named choices instead:
 
 | choice | what the configs get |
 |---|---|
@@ -187,17 +192,23 @@ overrides that when you mean it.
 
 ## What the terminal sees
 
-The menu uses ordinary line editing, not raw mode, so it works over SSH and on a
-dumb terminal and cannot leave your terminal broken. The tradeoff is that a
-**typed** secret is echoed by the terminal and may reach scrollback.
+The interactive dashboard is an Ink app and uses raw mode; it restores the
+terminal on every exit path, including errors and Ctrl-C, and a terminal that
+cannot enter raw mode gets the status report instead of a crash. Every
+non-interactive invocation — the flags, and anything without a TTY — never
+loads Ink at all and prints plain lines, so pipes and scripts are unaffected.
 
-- Prefer `g` when *setting* a value. A generated secret is never typed and never
-  echoed — only its first 8 characters are shown back.
-- `npm run creds:push` prints values **by design**: you cannot paste into a web
-  form what you cannot see. They stay in your scrollback afterwards, which is the
-  cost of a dashboard workflow rather than a `flyctl`/`wrangler` one. Clear it,
-  or run it in a window you close.
-- Everything else is redacted. The menu, the status report, the import summary
-  and the confirmation prompt show names and fingerprints only, so `creds:push`
-  after a `y` is the single place in the tool a credential is printed.
+- A **typed** secret is masked as you type (`•` per character plus a length),
+  so unlike the old readline menu it is never echoed and never reaches
+  scrollback. Still prefer `g` when *setting* a value — a generated secret has
+  full entropy and never passes through a keyboard or clipboard at all.
+- `npm run creds:push` (and `p` → `y` in the dashboard) prints values **by
+  design**: you cannot paste into a web form what you cannot see. The dashboard
+  prints them only *after* the UI has torn down, so they land in ordinary
+  scrollback — and they stay there, which is the cost of a dashboard workflow
+  rather than a `flyctl`/`wrangler` one. Clear it, or run it in a window you
+  close.
+- Everything else is redacted. The dashboard, the status report, the import
+  summary and the confirmation prompt show names and fingerprints only, so the
+  reveal after a `y` is the single place in the tool a credential is printed.
 - The store itself is plaintext, protected only by file mode 0600.

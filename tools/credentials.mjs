@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 // Interactive credential manager for local/credentials.json.
 //
-//   npm run creds                 the menu
+//   npm run creds                 the dashboard
 //   npm run creds:status          redacted report, never prompts
 //   npm run creds:push            reveal the secrets, to paste into the dashboards
 //
-// Prompts and a reprinted menu — no raw mode, no cursor addressing, no
-// clear-screen — so it works over SSH and on a dumb terminal, and cannot leave
-// a terminal in a broken state on any exit path.
+// The interactive path is an Ink dashboard (tools/tui/) and therefore uses
+// raw mode; Ink restores the terminal on every exit path, including thrown
+// errors, and a terminal that cannot switch to raw mode gets the status
+// report instead of a crash. Everything non-interactive — every flag, and any
+// invocation without a TTY — runs in this file with plain stdout and never
+// loads Ink, so scripts and pipes see the same tool they always did.
 //
 // Edits are written through immediately rather than saved on exit. The failure
 // this defends against is credential loss, and a freshly generated UUID that
@@ -15,27 +18,30 @@
 
 import { createInterface } from 'node:readline/promises';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 import {
   FIELDS, DEFAULT_STORE_PATH, StoreError,
-  emptyStore, readStore, writeStore, restoreBackup, storeMode, withField,
-  redact, generate, validateField, validateStore, field,
+  emptyStore, readStore, writeStore, storeMode, withField,
+  redact, validateStore,
   parseLegacyEnv, planImport, pushPlan, publicHostWarnings, platformNames,
   serializeEnv, writeEnvFile
 } from './credstore.mjs';
 
+const require = createRequire(import.meta.url);
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const LEGACY_ENV = resolve(ROOT, 'local/.env');
 
 const USAGE = `manage the credentials in local/credentials.json
 
-  npm run creds                    interactive menu
+  npm run creds                    interactive dashboard (S = quick setup)
   npm run creds:status             redacted report (never prompts)
   npm run creds:push               show the secrets, grouped by dashboard
   npm run creds:env                write local/deno.env for Deno Deploy import
   npm run creds:docker             write local/docker.env for the VPS compose stack
+  npm run creds:pin                print FRONT_CERT_PIN for the VPS .env (probes the edge)
   node tools/credentials.mjs --push --yes
                                    skip the confirmation (prints secrets)
   node tools/credentials.mjs --import PATH
@@ -90,15 +96,15 @@ export function renderMenu(store, storePath = DEFAULT_STORE_PATH) {
 
   lines.push('');
   lines.push('   r  render the configs      p  reveal secrets to paste');
-  lines.push('   e  export env files        u  undo last change');
-  lines.push('   q  quit');
+  lines.push('   e  export env files        f  print front cert pin');
+  lines.push('   u  undo last change        q  quit');
   lines.push('');
   return lines.join('\n');
 }
 
 export function statusReport(store, storePath = DEFAULT_STORE_PATH) {
   const problems = validateStore(store);
-  const lines = [renderMenu(store, storePath).replace(/\n\s{3}[rupqe] .*/g, '')];
+  const lines = [renderMenu(store, storePath).replace(/\n\s{3}[rupqef] .*/g, '')];
 
   for (const warning of publicHostWarnings(store)) lines.push(`warning: ${warning}`);
   if (problems.length) {
@@ -223,80 +229,6 @@ function makeAsk(rl) {
   };
 }
 
-function fieldHelp(f, current) {
-  const lines = ['', `${bold(f.key)}   ${dim(f.help)}`, `  current: ${redact(f.key, current)}`];
-  if (f.pushTo.length) lines.push(`  pushed to: ${f.pushTo.join(', ')}`);
-
-  const options = ['[enter] keep'];
-  if (f.generate) options.push('[g] generate');
-  if (!f.required) options.push('[c] clear');
-  options.push('[q] back');
-  lines.push('  ' + options.join('    '), '');
-  return lines.join('\n');
-}
-
-/** @returns the new value, null to delete, or undefined to leave unchanged. */
-export async function editField(f, store, ask, out) {
-  const current = store.credentials[f.key];
-
-  for (;;) {
-    out(fieldHelp(f, current));
-    const answer = await ask(`${f.key}> `);
-
-    if (answer === '' || answer === 'q') return undefined;
-    if (answer === 'g') {
-      if (!f.generate) { out(red(`  ${f.key} cannot be generated`)); continue; }
-      return f.generate();
-    }
-    if (answer === 'c') {
-      if (f.required) { out(red(`  ${f.key} is required${f.generate ? '; use g' : ''}`)); continue; }
-      return null;
-    }
-
-    const why = validateField(f.key, answer);
-    // Never echo the answer — for a secret field it is the credential.
-    if (why) { out(red(`  ${f.key} ${why}`)); continue; }
-    return answer;
-  }
-}
-
-/**
- * The CA is the one field with three states rather than a value, and the empty
- * string is one of them. A submenu means "leave it blank" can never silently
- * become either "no pinned CA" or "bundled" — both of which render a config
- * that works everywhere except the network the CA exists for.
- */
-export async function editCa(store, ask, out) {
-  const current = store.credentials.INTERCEPT_CA_FILE;
-  out([
-    '',
-    `${bold('INTERCEPT_CA_FILE')}   ${dim('which CA goes into the client configs?')}`,
-    `   1  bundled   the root from src/node/interceptca.js` +
-      (current === undefined ? dim('   (current)') : ''),
-    `   2  none      omit the certificates block entirely` +
-      (current === '' ? dim('   (current)') : ''),
-    `   3  file      supply your own PEM` +
-      (current ? dim(`   (current: ${current})`) : ''),
-    '   q  back',
-    ''
-  ].join('\n'));
-
-  for (;;) {
-    const answer = await ask('CA> ');
-    if (answer === 'q' || answer === '') return undefined;
-    if (answer === '1') return null;          // delete the key => bundled
-    if (answer === '2') return '';            // explicit "no pinned CA"
-    if (answer === '3') {
-      const path = await ask('path to a PEM file> ');
-      if (path === '') return undefined;
-      const why = validateField('INTERCEPT_CA_FILE', path);
-      if (why) { out(red(`  ${path} ${why}`)); continue; }
-      return path;
-    }
-    out(red('  choose 1, 2, 3 or q'));
-  }
-}
-
 /**
  * Show what is about to be printed, get a yes, then print it.
  *
@@ -369,82 +301,43 @@ export function exportDockerEnv(store, storePath, out) {
   return path;
 }
 
-// ==========================================
-// The menu loop
-// ==========================================
-
-export async function runMenu({ storePath, store, ask, out, render }) {
-  const numbered = FIELDS.slice();
-
-  for (;;) {
-    out(renderMenu(store, storePath));
-    for (const w of publicHostWarnings(store)) out(red(`warning: ${w}`));
-
-    let choice;
-    try {
-      choice = await ask('> ');
-    } catch (e) {
-      if (e instanceof Cancelled) return 130;
-      throw e;
-    }
-
-    if (choice === 'q') return 0;
-    if (choice === 'p') {
-      try {
-        await revealWithConfirmation(store, ask, out);
-      } catch (e) {
-        if (e instanceof Cancelled) out('  (cancelled)');
-        else throw e;
-      }
-      continue;
-    }
-    if (choice === 'r') {
-      if (render) await render(store);
-      continue;
-    }
-    if (choice === 'e') {
-      try {
-        out(dim('  deno.env — Deno Deploy'));
-        exportDenoEnv(store, storePath, out);
-        out(dim('  docker.env — VPS compose stack'));
-        exportDockerEnv(store, storePath, out);
-      } catch (e) {
-        out(red(`  ${e.message}`));
-      }
-      continue;
-    }
-    if (choice === 'u') {
-      try {
-        store = restoreBackup(storePath);
-        out('  restored the previous store');
-      } catch (e) {
-        out(red(`  ${e.message}`));
-      }
-      continue;
-    }
-
-    const f = numbered[Number(choice) - 1];
-    if (!f) { out(red('  unknown choice')); continue; }
-
-    try {
-      const next = f.key === 'INTERCEPT_CA_FILE'
-        ? await editCa(store, ask, out)
-        : await editField(f, store, ask, out);
-
-      if (next === undefined) continue;
-
-      const updated = withField(store, f.key, next);
-      // Write through: an edit that exists only in memory is the thing you
-      // cannot recover.
-      writeStore(storePath, updated);
-      store = updated;
-      out(`  ${f.key} ${next === null ? 'cleared' : 'set'} — ` +
-          `${redact(f.key, updated.credentials[f.key])}`);
-    } catch (e) {
-      if (e instanceof Cancelled) { out('  (cancelled)'); continue; }
-      out(red(`  ${e.message}`));
-    }
+/**
+ * Probe the VPS edge for the cert it serves under the spoofed SNI and print
+ * FRONT_CERT_PIN, ready to paste into the stack's .env. The server normally
+ * self-probes for this, but a container that cannot NAT-hairpin to its own
+ * public IP can be handed the pin instead.
+ *
+ * The pin is a public fingerprint, not a secret — so this prints straight to the
+ * terminal with no confirmation. `probe` is injectable for tests; it defaults to
+ * the runtime tls probe in src/node/certpin.js.
+ *
+ * @returns the pin string, or null when the inputs are missing or the probe fails.
+ */
+export async function printFrontPin(store, out, probe) {
+  const host = store.credentials.VPS_HOST;
+  const sni = store.credentials.FRONT_SNI;
+  if (!host || !sni) {
+    out('  set VPS_HOST and FRONT_SNI first (fronting needs both)');
+    return null;
   }
+  const fetch = probe || ((h, s) => require(join(ROOT, 'src/node/certpin.js')).fetchCertInfo(h, s));
+  out(dim(`  probing ${host}:443 with SNI ${sni} …`));
+  let info;
+  try {
+    info = await fetch(host, sni);
+  } catch (e) {
+    out(red(`  probe failed: ${e.message}`));
+    return null;
+  }
+  out(dim(`  cert: CN=${info.subject}  issuer=${info.issuer}  expires ${info.validTo}`));
+  if (/fatih|meb/i.test(info.issuer)) {
+    out(red('  warning: this looks like an interception cert — pinning it only works on that network'));
+  }
+  out('');
+  out(`FRONT_CERT_PIN=${info.pin}`);
+  out('');
+  out(dim('  add that line to the Dockge stack\'s .env (alongside the docker.env keys), then redeploy'));
+  return info.pin;
 }
 
 // ==========================================
@@ -532,6 +425,13 @@ async function main(argv) {
     return path ? 0 : 1;
   }
 
+  if (argv.includes('--front-pin')) {
+    // Probes the edge and prints a public fingerprint, so it is safe off a TTY.
+    const store = loadStoreOrEmpty(storePath);
+    const pin = await printFrontPin(store, (s) => console.log(s));
+    return pin ? 0 : 1;
+  }
+
   if (argv.includes('--import')) {
     const path = argValue(argv, '--import');
     if (!path) { console.error('error: --import needs a path'); return 64; }
@@ -569,22 +469,19 @@ async function main(argv) {
     console.log(`Import it with:  node tools/credentials.mjs --import local/.env\n`);
   }
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    return await runMenu({
-      storePath,
-      store,
-      ask: makeAsk(rl),
-      out: (s) => console.log(s),
-      render: async () => {
-        const mod = await import('./render-configs.mjs');
-        void mod;
-        console.log('  run `npm run configs` to render');
-      }
-    });
-  } finally {
-    rl.close();
+  // Some terminals have a TTY that cannot switch to raw mode; the dashboard
+  // needs it, so degrade to the report rather than crash mid-switch.
+  if (typeof process.stdin.setRawMode !== 'function') {
+    console.log(statusReport(store, storePath));
+    console.error(dim('\nthis terminal cannot enter raw mode — showing the report instead'));
+    return validateStore(store).length ? 1 : 0;
   }
+
+  // Ink (and React with it) loads only here — never for a flag, a pipe, or a
+  // script, which is what keeps the non-interactive contracts above cheap and
+  // true.
+  const { runTui } = await import('./tui/index.mjs');
+  return runTui({ storePath, store, pathLabel: storePath.replace(ROOT + '/', '') });
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

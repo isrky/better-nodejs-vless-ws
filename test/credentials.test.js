@@ -1,12 +1,11 @@
 'use strict';
 
-// The credential manager.
-//
-// The menu takes its reader and writer as parameters, which is what makes the
-// whole loop drivable from here with a scripted array — no TTY, no readline, no
-// pseudo-terminal. What that seam cannot cover (real SIGINT/EOF handling, and
-// how a terminal echoes a typed secret) is covered by subprocess tests below
-// and, beyond that, by a manual checklist in CREDENTIALS.md.
+// The credential manager's non-interactive surface: the pure report/export
+// helpers both the CLI flags and the Ink dashboard share, and the
+// process-level contracts (no prompt without a TTY, no secret to a pipe).
+// The interactive flows themselves live in the reducer and are tested in
+// test/tui-reducer.test.js; what neither suite can cover (real keystrokes,
+// terminal restore) stays with the manual checklist in CREDENTIALS.md.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -37,129 +36,6 @@ function tmpStore() {
   cs.writeStore(p, store);
   return { storePath: p, store };
 }
-
-/** Drive the menu with a fixed list of answers. */
-async function drive(answers, { storePath, store }) {
-  const said = [];
-  const queue = answers.slice();
-  const code = await cm.runMenu({
-    storePath,
-    store,
-    ask: async () => {
-      if (!queue.length) throw new Error('the menu asked more questions than were scripted');
-      return queue.shift();
-    },
-    out: (s) => said.push(String(s))
-  });
-  return { code, said: said.join('\n'), remaining: queue.length };
-}
-
-// ---------- the menu ----------
-
-test('q quits cleanly', async () => {
-  const ctx = tmpStore();
-  const { code, remaining } = await drive(['q'], ctx);
-  assert.equal(code, 0);
-  assert.equal(remaining, 0);
-});
-
-test('generating a value writes it through immediately', async () => {
-  // Write-through, not save-on-exit: a freshly generated UUID that existed only
-  // in memory would be exactly the thing you cannot recover.
-  const ctx = tmpStore();
-  const before = cs.readStore(ctx.storePath).credentials.UUID;
-
-  const { said } = await drive(['1', 'g', 'q'], ctx);
-
-  const after = cs.readStore(ctx.storePath).credentials.UUID;
-  assert.notEqual(after, before);
-  assert.equal(cs.validateField('UUID', after), null);
-  assert.ok(!said.includes(after.slice(9)), 'only the first 8 characters may be shown');
-});
-
-test('bare enter keeps the current value', async () => {
-  const ctx = tmpStore();
-  const before = cs.readStore(ctx.storePath).credentials.UUID;
-  await drive(['1', '', 'q'], ctx);
-  assert.equal(cs.readStore(ctx.storePath).credentials.UUID, before);
-});
-
-test('an invalid value re-prompts the same field instead of aborting', async () => {
-  const ctx = tmpStore();
-  const { said, remaining } = await drive(['3', 'nope.example:443', 'good.example.dev', 'q'], ctx);
-
-  assert.equal(remaining, 0, 'the session must survive a bad entry');
-  assert.match(said, /not a valid hostname/);
-  assert.equal(cs.readStore(ctx.storePath).credentials.FLY_HOST, 'good.example.dev');
-});
-
-test('a rejected value is never echoed back', async () => {
-  const ctx = tmpStore();
-  const { said } = await drive(['1', 'SENTINEL-BAD-UUID-VALUE', 'q', 'q'], ctx);
-  assert.ok(!said.includes('SENTINEL-BAD-UUID-VALUE'), 'the rejected input may be a credential');
-});
-
-test('a required field refuses to be cleared, an optional one accepts it', async () => {
-  const ctx = tmpStore();
-  const { said } = await drive(['1', 'c', 'q', 'q'], ctx);
-  assert.match(said, /UUID is required/);
-  assert.ok(cs.readStore(ctx.storePath).credentials.UUID, 'and it is still set');
-
-  const withToken = cs.withField(cs.readStore(ctx.storePath), 'ADMIN_TOKEN', 'a'.repeat(44));
-  cs.writeStore(ctx.storePath, withToken);
-  await drive(['9', 'c', 'q'], { storePath: ctx.storePath, store: withToken });
-  assert.equal('ADMIN_TOKEN' in cs.readStore(ctx.storePath).credentials, false);
-});
-
-test('PROVISION_SECRET_PREVIOUS cannot be generated from the menu', async () => {
-  const ctx = tmpStore();
-  const { said } = await drive(['11', 'g', 'q', 'q'], ctx);
-  assert.match(said, /cannot be generated/);
-});
-
-test('undo restores the previous store', async () => {
-  const ctx = tmpStore();
-  const original = cs.readStore(ctx.storePath).credentials.UUID;
-
-  await drive(['1', 'g', 'q'], ctx);
-  const changed = cs.readStore(ctx.storePath).credentials.UUID;
-  assert.notEqual(changed, original);
-
-  await drive(['u', 'q'], { storePath: ctx.storePath, store: cs.readStore(ctx.storePath) });
-  assert.equal(cs.readStore(ctx.storePath).credentials.UUID, original);
-});
-
-test('an unknown menu choice is reported, not fatal', async () => {
-  const ctx = tmpStore();
-  const { said, code } = await drive(['zzz', 'q'], ctx);
-  assert.match(said, /unknown choice/);
-  assert.equal(code, 0);
-});
-
-// ---------- the CA submenu ----------
-
-test('the CA submenu sets all three states without ever typing an empty string', async () => {
-  const ctx = tmpStore();
-
-  // 2 = none -> the explicit empty string
-  await drive(['7', '2', 'q'], ctx);
-  assert.equal(cs.readStore(ctx.storePath).credentials.INTERCEPT_CA_FILE, '');
-
-  // 1 = bundled -> the key is deleted, which is a different state from ''
-  await drive(['7', '1', 'q'], { storePath: ctx.storePath, store: cs.readStore(ctx.storePath) });
-  assert.equal('INTERCEPT_CA_FILE' in cs.readStore(ctx.storePath).credentials, false);
-
-  // 3 = a path
-  await drive(['7', '3', 'test/fixtures/ca.pem', 'q'],
-    { storePath: ctx.storePath, store: cs.readStore(ctx.storePath) });
-  assert.equal(cs.readStore(ctx.storePath).credentials.INTERCEPT_CA_FILE, 'test/fixtures/ca.pem');
-});
-
-test('the CA submenu rejects a DER path and re-prompts', async () => {
-  const ctx = tmpStore();
-  const { said } = await drive(['7', '3', 'MEB_SERTIFIKASI.cer', 'q', 'q'], ctx);
-  assert.match(said, /DER/);
-});
 
 // ---------- reports ----------
 
@@ -274,19 +150,29 @@ test('the reveal warns about the Cloudflare secret-vs-variable trap', () => {
 });
 
 test('the reveal is gated: n prints nothing, y prints the values', async () => {
+  // revealWithConfirmation is the CLI --push path; the dashboard's equivalent
+  // gate (confirm, then print after teardown) is asserted in the reducer suite.
   const ctx = tmpStore();
+  const gate = async (answer) => {
+    const said = [];
+    const shown = await cm.revealWithConfirmation(ctx.store, async () => answer, (s) => said.push(String(s)));
+    return { shown, said: said.join('\n') };
+  };
 
-  const no = await drive(['p', 'n', 'q'], ctx);
+  const no = await gate('n');
+  assert.equal(no.shown, false);
   assert.ok(!no.said.includes(ctx.store.credentials.UUID), 'answering n must print no value');
   assert.match(no.said, /nothing printed/);
 
-  const yes = await drive(['p', 'y', 'q'], ctx);
+  const yes = await gate('y');
+  assert.equal(yes.shown, true);
   assert.ok(yes.said.includes(ctx.store.credentials.UUID), 'answering y must print the value');
 });
 
-test('e exports a 0600 deno.env with only the deno vars and prints no secret', async () => {
+test('exportDenoEnv writes a 0600 deno.env with only the deno vars and prints no secret', () => {
   const ctx = tmpStore();
-  const { said } = await drive(['e', 'q'], ctx);
+  const said = [];
+  cm.exportDenoEnv(ctx.store, ctx.storePath, (s) => said.push(String(s)));
 
   const envPath = path.join(path.dirname(ctx.storePath), 'deno.env');
   assert.ok(fs.existsSync(envPath), 'deno.env is written');
@@ -297,27 +183,31 @@ test('e exports a 0600 deno.env with only the deno vars and prints no secret', a
   assert.match(text, /^WSPATH=\/test-ws-path$/m);
   assert.ok(!text.includes('FLY_HOST'), 'only the deno vars are exported');
 
-  // The menu announces the path and key names but never the secret itself.
-  assert.ok(!said.includes(ctx.store.credentials.UUID), 'no secret printed to the terminal');
-  assert.match(said, /wrote .*deno\.env \(UUID, WSPATH\)/);
+  // The announcement carries the path and key names but never the secret itself.
+  const announced = said.join('\n');
+  assert.ok(!announced.includes(ctx.store.credentials.UUID), 'no secret printed to the terminal');
+  assert.match(announced, /wrote .*deno\.env \(UUID, WSPATH\)/);
 });
 
-test('e reports nothing to export when no deno vars are set', async () => {
+test('the exports report nothing to export when no vars are set', () => {
   const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'creds-')), 'credentials.json');
   const store = cs.emptyStore();
   cs.writeStore(p, store);
 
-  const { said } = await drive(['e', 'q'], { storePath: p, store });
-  assert.match(said, /nothing to export/);
+  const said = [];
+  cm.exportDenoEnv(store, p, (s) => said.push(String(s)));
+  cm.exportDockerEnv(store, p, (s) => said.push(String(s)));
+  assert.match(said.join('\n'), /nothing to export/);
   assert.ok(!fs.existsSync(path.join(path.dirname(p), 'deno.env')), 'no file is written');
   assert.ok(!fs.existsSync(path.join(path.dirname(p), 'docker.env')), 'no file is written');
 });
 
-test('e also exports a 0600 docker.env with VPS_HOST renamed to PUBLIC_HOST', async () => {
+test('exportDockerEnv writes a 0600 docker.env with VPS_HOST renamed to PUBLIC_HOST', () => {
   const ctx = tmpStore();
   const withHost = cs.withField(ctx.store, 'VPS_HOST', 'vps.example.dev');
   cs.writeStore(ctx.storePath, withHost);
-  const { said } = await drive(['e', 'q'], { storePath: ctx.storePath, store: withHost });
+  const said = [];
+  cm.exportDockerEnv(withHost, ctx.storePath, (s) => said.push(String(s)));
 
   const envPath = path.join(path.dirname(ctx.storePath), 'docker.env');
   assert.ok(fs.existsSync(envPath), 'docker.env is written');
@@ -330,8 +220,52 @@ test('e also exports a 0600 docker.env with VPS_HOST renamed to PUBLIC_HOST', as
   assert.ok(!text.includes('VPS_HOST'), 'the store key itself never appears');
   assert.ok(!text.includes('FLY_HOST'), 'only the docker vars are exported');
 
-  assert.ok(!said.includes(ctx.store.credentials.UUID), 'no secret printed to the terminal');
-  assert.match(said, /wrote .*docker\.env \(UUID, WSPATH, VPS_HOST\)/);
+  const announced = said.join('\n');
+  assert.ok(!announced.includes(ctx.store.credentials.UUID), 'no secret printed to the terminal');
+  assert.match(announced, /wrote .*docker\.env \(UUID, WSPATH, VPS_HOST\)/);
+});
+
+test('printFrontPin probes and prints FRONT_CERT_PIN plus the cert description', async () => {
+  const ctx = tmpStore();
+  let s = cs.withField(ctx.store, 'VPS_HOST', 'sync.example.dev');
+  s = cs.withField(s, 'FRONT_SNI', 'www.microsoft.com');
+
+  const calls = [];
+  const stub = async (host, sni) => {
+    calls.push([host, sni]);
+    return { pin: 'd'.repeat(64), subject: 'yunohost.org', issuer: 'yunohost.org', validTo: 'Jan 1 2030' };
+  };
+
+  const out = [];
+  const pin = await cm.printFrontPin(s, (line) => out.push(line), stub);
+  const said = out.join('\n');
+
+  assert.deepEqual(calls, [['sync.example.dev', 'www.microsoft.com']], 'probes VPS_HOST with the front SNI');
+  assert.equal(pin, 'd'.repeat(64));
+  assert.match(said, /^FRONT_CERT_PIN=d{64}$/m, 'prints a ready-to-paste line');
+  assert.match(said, /issuer=yunohost\.org/, 'shows the issuer so a MITM cert is obvious');
+});
+
+test('printFrontPin warns when the probe returns an interception cert', async () => {
+  const ctx = tmpStore();
+  let s = cs.withField(ctx.store, 'VPS_HOST', 'sync.example.dev');
+  s = cs.withField(s, 'FRONT_SNI', 'www.microsoft.com');
+
+  const stub = async () => ({ pin: 'e'.repeat(64), subject: 'www.microsoft.com', issuer: 'fatihca', validTo: 'x' });
+  const out = [];
+  await cm.printFrontPin(s, (line) => out.push(line), stub);
+  assert.match(out.join('\n'), /interception cert/, 'flags a fatihca issuer');
+});
+
+test('printFrontPin needs VPS_HOST and FRONT_SNI and never probes without them', async () => {
+  const ctx = tmpStore();   // VPS_HOST / FRONT_SNI unset
+  let probed = false;
+  const out = [];
+  const pin = await cm.printFrontPin(ctx.store, (line) => out.push(line), async () => { probed = true; });
+
+  assert.equal(pin, null);
+  assert.equal(probed, false, 'must not touch the network with inputs missing');
+  assert.match(out.join('\n'), /set VPS_HOST and FRONT_SNI/);
 });
 
 test('the platform names come from the committed config, and degrade when absent', () => {
