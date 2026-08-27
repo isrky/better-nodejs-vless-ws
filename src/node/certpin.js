@@ -21,23 +21,26 @@ const tls = require('tls');
 const PIN_RE = /^[0-9a-f]{64}$/;
 
 /**
- * Connect, read the leaf certificate's SHA-256, return it as 64 lowercase hex
- * chars with no colons — exactly Xray's pinnedPeerCertSha256 form.
+ * Connect and read the leaf certificate, returning its pin plus a short
+ * description for confirmation (so an operator can see they are pinning the real
+ * edge cert, not an interceptor's).
  *
- * rejectUnauthorized is false on purpose: we are not trusting the certificate,
- * we are fingerprinting whatever is presented (which, for a spoofed SNI, will
- * not match the name anyway).
+ * `pin` is 64 lowercase hex chars, no colons — exactly Xray's
+ * pinnedPeerCertSha256 form. rejectUnauthorized is false on purpose: we are not
+ * trusting the certificate, we are fingerprinting whatever is presented (which,
+ * for a spoofed SNI, will not match the name anyway).
  *
- * @returns {Promise<string>} the pin; rejects on timeout, no cert, or error.
+ * @returns {Promise<{pin:string, subject:string, issuer:string, validTo:string}>}
+ *          rejects on timeout, no cert, or error.
  */
-function fetchCertPin(host, servername, { port = 443, timeoutMs = 5000 } = {}) {
+function fetchCertInfo(host, servername, { port = 443, timeoutMs = 5000 } = {}) {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const done = (err, pin) => {
+    const done = (err, info) => {
       if (settled) return;
       settled = true;
       try { socket.destroy(); } catch (e) { /* already gone */ }
-      if (err) reject(err); else resolve(pin);
+      if (err) reject(err); else resolve(info);
     };
 
     const socket = tls.connect(
@@ -47,12 +50,22 @@ function fetchCertPin(host, servername, { port = 443, timeoutMs = 5000 } = {}) {
         if (!cert || !cert.fingerprint256) return done(new Error('no peer certificate'));
         const pin = cert.fingerprint256.replace(/:/g, '').toLowerCase();
         if (!PIN_RE.test(pin)) return done(new Error(`unexpected fingerprint: ${pin}`));
-        done(null, pin);
+        done(null, {
+          pin,
+          subject: (cert.subject && cert.subject.CN) || '?',
+          issuer: (cert.issuer && cert.issuer.CN) || '?',
+          validTo: cert.valid_to || '?'
+        });
       }
     );
     socket.setTimeout(timeoutMs, () => done(new Error(`cert probe timed out after ${timeoutMs}ms`)));
     socket.on('error', (e) => done(e));
   });
+}
+
+/** Just the pin — the form the config and the cache consume. */
+function fetchCertPin(host, servername, opts) {
+  return fetchCertInfo(host, servername, opts).then((info) => info.pin);
 }
 
 /**
@@ -93,4 +106,4 @@ function createPinCache({ host, servername, port = 443, ttlMs = 6 * 3600 * 1000,
   };
 }
 
-module.exports = { fetchCertPin, createPinCache };
+module.exports = { fetchCertInfo, fetchCertPin, createPinCache };

@@ -29,6 +29,17 @@ test('FRONT_SNI is read, trimmed and lowercased; unset means fronting off', () =
   assert.equal(loadConfig({ FRONT_SNI: '  ChatGPT.com ' }).frontSni, 'chatgpt.com');
 });
 
+test('FRONT_CERT_PIN is accepted only as 64 hex; malformed is dropped', () => {
+  assert.equal(loadConfig({}).frontPin, '', 'unset');
+  const hex = 'a'.repeat(64);
+  assert.equal(loadConfig({ FRONT_CERT_PIN: hex }).frontPin, hex);
+  // openssl's colon-separated, upper-case fingerprint normalises in.
+  const colonUpper = Array(32).fill('AB').join(':');   // AB:AB:… -> 64 hex
+  assert.equal(loadConfig({ FRONT_CERT_PIN: colonUpper }).frontPin, 'ab'.repeat(32), 'colons stripped, lowercased');
+  assert.equal(loadConfig({ FRONT_CERT_PIN: 'zz' + 'a'.repeat(62) }).frontPin, '', 'non-hex dropped');
+  assert.equal(loadConfig({ FRONT_CERT_PIN: 'a'.repeat(63) }).frontPin, '', 'wrong length dropped');
+});
+
 test('the UUID is expanded to its 16 bytes', () => {
   const config = loadConfig({ UUID: '00112233-4455-6677-8899-aabbccddeeff' });
   assert.equal(config.uuidBytes.length, 16);

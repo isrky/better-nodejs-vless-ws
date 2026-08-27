@@ -23,7 +23,7 @@ const { log: defaultLog } = require('./log.js');
 const { createBurnStore } = require('./tokens.js');
 const { createRateLimiter } = require('./ratelimit.js');
 const { createPinCache } = require('./certpin.js');
-const { handleConnection } = require('./session.js');
+const { handleConnection, ADMIN_PATH } = require('./session.js');
 
 /**
  * @param {object} options
@@ -80,12 +80,15 @@ function createServer(options = {}) {
   };
 
   // Domain-fronted invites need the SHA-256 of the cert the public edge serves
-  // for the spoofed SNI. Constructing the cache is inert (no probe, no timer);
-  // the first probe fires only when a fronted invite is actually served, which
-  // keeps createServer() side-effect free.
-  const frontPin = options.frontPin || (config.frontSni && config.publicHost
-    ? createPinCache({ host: config.publicHost, servername: config.frontSni, port: config.publicPort })
-    : null);
+  // for the spoofed SNI. A configured FRONT_CERT_PIN wins (hairpin-proof, no
+  // probe); otherwise self-probe lazily — constructing the cache is inert (no
+  // probe, no timer), so createServer() stays side-effect free.
+  const frontPin = options.frontPin || (
+    config.frontPin
+      ? { get: async () => config.frontPin, stop() {} }
+      : (config.frontSni && config.publicHost)
+        ? createPinCache({ host: config.publicHost, servername: config.frontSni, port: config.publicPort })
+        : null);
 
   const deps = { config, stats, dns, log, burn, limits, frontPin };
 
@@ -129,18 +132,34 @@ function createServer(options = {}) {
   };
 }
 
+/**
+ * The startup banner as one string, kept pure so tests can assert on it
+ * without binding a port. The Admin Stats URL is only printed when it would
+ * actually work: PUBLIC_HOST gives it a real origin (https, port elided at
+ * 443), and without ADMIN_TOKEN the route serves only the decoy, so a URL
+ * would be a lie — same rule as adminUrl() in tools/credentials.mjs.
+ */
+function bannerText(config) {
+  const origin = config.publicHost
+    ? `https://${config.publicHost}${config.publicPort === 443 ? '' : `:${config.publicPort}`}`
+    : `http://${config.host}:${config.port}`;
+  const adminLine = config.adminToken
+    ? `Admin Stats: ${origin}${ADMIN_PATH}?token=${encodeURIComponent(config.adminToken)}`
+    : 'Admin Stats: disabled (set ADMIN_TOKEN)';
+  return `\n Native vls-WS Server Active on ${config.host}:${config.port}\n` +
+         `Path: ${config.wsPath}\nUUID: ${config.uuid}\n\n ${adminLine}\n`;
+}
+
 /** createServer() plus the port bind and the startup banner. */
 function startServer(options = {}) {
   const handle = createServer(options);
   const { config } = handle;
 
   handle.server.listen(config.port, config.host, () => {
-    console.log(`\n Native vls-WS Server Active on ${config.host}:${config.port}\n` +
-                `Path: ${config.wsPath}\nUUID: ${config.uuid}\n`);
-    console.log(` Admin Stats: http://${config.host}:${config.port}/admin-stats\n`);
+    console.log(bannerText(config));
   });
 
   return handle;
 }
 
-module.exports = { createServer, startServer };
+module.exports = { createServer, startServer, bannerText };

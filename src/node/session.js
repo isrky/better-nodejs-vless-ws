@@ -782,4 +782,5 @@ function handleConnection(client, deps) {
 
 // tokensMatch now lives in tokens.js alongside the rest of the signing code;
 // re-exported here because that is where callers and tests already import it.
-module.exports = { Session, handleConnection, tokensMatch };
+// ADMIN_PATH is exported so the startup banner shares this single definition.
+module.exports = { Session, handleConnection, tokensMatch, ADMIN_PATH };

@@ -351,6 +351,30 @@ test('?front=pin serves a spoofed-SNI, cert-pinned config when the edge is reach
   assert.equal(out.streamSettings.wsSettings.host, 'edge.example.dev', 'Host stays real');
 });
 
+test('FRONT_CERT_PIN env makes the server serve a pinned config with no self-probe', async (t) => {
+  // No options.frontPin here — this exercises server.js building the static
+  // provider from config.frontPin, the fix for the NAT-hairpin probe failure.
+  const ENV_PIN = 'f'.repeat(64);
+  const srv = await new Promise((resolve) => {
+    const handle = createServer({ config: loadConfig({ ...FRONT_ENV, FRONT_CERT_PIN: ENV_PIN }), logger: () => {} });
+    const open = new Set();
+    handle.server.on('connection', (s) => { open.add(s); s.on('close', () => open.delete(s)); });
+    handle.server.listen(0, '127.0.0.1', () => resolve({
+      port: handle.server.address().port,
+      close: () => new Promise((done) => { handle.close(done); for (const s of open) s.destroy(); })
+    }));
+  });
+  t.after(() => srv.close());
+
+  const token = (await mintFront(srv.port, await login(srv.port), 'pin')).split('?')[0];
+  const { head, body } = await fetchOf(srv.port, `/i/${token}/conf.json?front=pin`);
+  assert.match(head, /filename="vless-alice-fronted\.json"/);
+  const tls = JSON.parse(body.toString()).outbounds[0].streamSettings.tlsSettings;
+  assert.equal(tls.serverName, 'www.microsoft.com');
+  assert.equal(tls.pinnedPeerCertSha256, ENV_PIN, 'uses the configured pin, no probe');
+  assert.equal(tls.certificates, undefined);
+});
+
 test('?front=ca serves a spoofed-SNI, CA-verified config with no probe', async (t) => {
   // Stub returns null (edge unreachable) — ca must NOT depend on the probe.
   const srv = await startFront(null);

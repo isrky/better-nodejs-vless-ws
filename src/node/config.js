@@ -77,8 +77,16 @@ function loadConfig(env = process.env) {
     publicPort: parseInt(env.PUBLIC_PORT || '443', 10),
     // Allowed/high-reputation domain to spoof as the TLS SNI for domain-fronted
     // invites. Unset => fronting disabled and the ?front toggle serves the
-    // standard config. The cert pin is probed at runtime, never configured.
+    // standard config.
     frontSni: String(env.FRONT_SNI || '').trim().toLowerCase(),
+    // The cert pin for pinned fronting. Normally the server self-probes its edge,
+    // but a container that cannot NAT-hairpin to its own public IP can be handed
+    // the pin here instead (see `npm run creds:pin`). A malformed value is
+    // dropped rather than shipped as a broken pin.
+    frontPin: (() => {
+      const p = String(env.FRONT_CERT_PIN || '').replace(/:/g, '').trim().toLowerCase();
+      return /^[0-9a-f]{64}$/.test(p) ? p : '';
+    })(),
     interceptCa: String(env.INTERCEPT_CA || ''),
     // Fly terminates TLS upstream, so X-Forwarded-Proto and Fly-Client-IP are
     // only trustworthy when we know we are behind that proxy.

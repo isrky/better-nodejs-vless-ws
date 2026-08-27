@@ -6,7 +6,7 @@ const tls = require('tls');
 const crypto = require('crypto');
 const { X509Certificate } = require('crypto');
 
-const { fetchCertPin, createPinCache } = require('../src/node/certpin.js');
+const { fetchCertInfo, fetchCertPin, createPinCache } = require('../src/node/certpin.js');
 
 // A throwaway self-signed cert/key (RSA-2048, CN=pin-test) for the in-process
 // TLS server to present. It only ever serves loopback in this test.
@@ -42,6 +42,16 @@ test('fetchCertPin returns the served leaf cert fingerprint as 64 lowercase hex'
     const pin = await fetchCertPin('127.0.0.1', 'anything.example', { port });
     assert.match(pin, /^[0-9a-f]{64}$/);
     assert.equal(pin, EXPECTED, 'matches an independent DER SHA-256');
+  });
+});
+
+test('fetchCertInfo returns the pin plus a cert description', async () => {
+  await withServer(async (port) => {
+    const info = await fetchCertInfo('127.0.0.1', 'anything.example', { port });
+    assert.equal(info.pin, EXPECTED);
+    assert.equal(info.subject, 'pin-test', 'subject CN');
+    assert.equal(info.issuer, 'pin-test', 'self-signed: issuer CN == subject CN');
+    assert.ok(info.validTo && info.validTo !== '?', 'carries an expiry');
   });
 });
 

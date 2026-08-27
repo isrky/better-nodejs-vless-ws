@@ -179,7 +179,9 @@ cd /opt/stacks
 git clone https://github.com/you/better-nodejs-vless-ws vless-ws
 ```
 
-Secrets go in a `.env` next to `compose.yaml` (gitignored). On your own machine, `npm run creds:docker` writes `local/docker.env` with exactly the keys the container reads — `UUID`, `WSPATH`, `ADMIN_TOKEN`, `PROVISION_SECRET`, `USERS`, and `PUBLIC_HOST` (from the store's `VPS_HOST`) — paste its contents into Dockge's env editor, then start the stack. Optionally add `DOH_URL=` there too (deployment config rather than a credential, same as `fly.toml`'s `[env]` block). Updating is `git pull` + rebuild in Dockge; the container drains connections for up to 25 s on stop instead of hard-cutting live tunnels.
+Secrets go in a `.env` next to `compose.yaml` (gitignored) — `cp .env.example .env` for a commented template. On your own machine, `npm run creds:docker` writes `local/docker.env` with exactly the keys the container reads — `UUID`, `WSPATH`, `ADMIN_TOKEN`, `PROVISION_SECRET`, `USERS`, and `PUBLIC_HOST` (from the store's `VPS_HOST`) — paste its contents into Dockge's env editor, then start the stack. Optionally add `DOH_URL=` there too (deployment config rather than a credential, same as `fly.toml`'s `[env]` block). Updating is `git pull` + rebuild in Dockge; the container drains connections for up to 25 s on stop instead of hard-cutting live tunnels.
+
+With `PUBLIC_HOST` and `ADMIN_TOKEN` set, the startup banner (visible in `docker logs` / Dockge) prints the real dashboard URL — `https://<PUBLIC_HOST>/admin-stats?token=<ADMIN_TOKEN>` — instead of the container's bind address.
 
 The image healthcheck probes `GET /` (served the decoy, always 200), so Dockge shows real health.
 
@@ -210,9 +212,17 @@ There are **two fronting modes**, one per network type — because how the cert 
 
 **Producing them:** `npm run configs` renders `conf-vps-fronted.json` + `-mitm.json` (and their `conf-android-*` twins) once `FRONT_SNI` is set; the CA-trust files render offline (no probe), the pinned ones only when the live probe succeeds. On the endpoint, with `FRONT_SNI` in the container's `.env` (it flows there via `npm run creds:docker`), the operator picks **None / Pinned / CA-trust** when minting an invite.
 
+**If the server can't probe its own edge:** a container often can't reach its host's public IP (no NAT hairpin), so the server's self-probe fails and `?front=pin` quietly falls back to the standard config. Feed it the pin instead: run `npm run creds:pin` (dashboard key **f**) from your machine — it probes the edge, prints the cert it sees (so you can confirm it's *your* cert, not an interceptor's), and outputs a ready line:
+
+```
+FRONT_CERT_PIN=df3733b2…
+```
+
+Add that line to the stack's `.env` (alongside the `creds:docker` keys — it isn't part of that export) and redeploy. The server then uses the static pin, no probe. The **local** `conf-vps-fronted.json` never had this problem (it probes from your machine).
+
 Notes:
 
-- **Pinned rotates:** the pin is of the leaf your edge serves (nginx's `default_server` cert). Let's Encrypt rotates it ~60 days — the local files re-probe every `npm run configs` and the server re-probes on its own, so this is automatic unless you pin by hand.
+- **When the pin changes:** it's the cert your edge serves for an unknown SNI — on YunoHost that's the self-signed `yunohost.org` default, which is stable, so `FRONT_CERT_PIN` rarely needs refreshing. If you ever put a real cert on that default vhost, it rotates (Let's Encrypt ~60 days) and you re-run `creds:pin`. The local pinned file re-probes on every `npm run configs`.
 - Fronting is Node/VPS-only; the Worker and Deno targets can't front to your backend.
 
 ---
