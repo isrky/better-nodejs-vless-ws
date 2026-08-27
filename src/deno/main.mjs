@@ -15,7 +15,9 @@ import { runDnsRelay } from '../worker/dns.mjs';
 import { runMuxSession } from '../worker/mux.mjs';
 import { decoyResponse } from '../worker/pages.mjs';
 import { runTcpRelay } from '../worker/relay.mjs';
+import { ensureSecrets } from '../worker/secrets.mjs';
 import { makeWsReadable, safeClose } from '../worker/wsstream.mjs';
+import secretsCipher from '../node/secrets.enc.json' with { type: 'json' };
 
 const { ByteQueue, parseVlessHeader } = vless;
 
@@ -26,8 +28,14 @@ const env = {
   UUID: Deno.env.get('UUID'),
   WSPATH: Deno.env.get('WSPATH'),
   PROXYIP: Deno.env.get('PROXYIP'),
-  DOH_URL: Deno.env.get('DOH_URL')
+  DOH_URL: Deno.env.get('DOH_URL'),
+  SECRETS_KEY_COMMON: Deno.env.get('SECRETS_KEY_COMMON'),
+  SECRETS_KEY_EDGE: Deno.env.get('SECRETS_KEY_EDGE')
 };
+
+// Decrypt the committed secrets once at startup (top-level await), so the shared
+// worker/config.mjs accessors see them. A no-op when no group key is set.
+await ensureSecrets(env, secretsCipher);
 
 // dns.mjs uses `caches.default` (a Cloudflare extension). Deno exposes the Web
 // Cache API via caches.open() but no `.default`, so define it once. Kept

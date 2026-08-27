@@ -43,6 +43,12 @@ routes = [
 #   npx wrangler secret put UUID
 # Until it is set, the Worker serves the decoy page to every request and
 # proxies nothing. For local runs, put UUID in .dev.vars (gitignored).
+#
+# ALTERNATIVE (see CREDENTIALS.md § Encrypted secrets): instead of UUID/WSPATH/
+# PROXYIP secrets, set the two group keys and let the Worker decrypt the bundled
+# src/node/secrets.enc.json on first request:
+#   npx wrangler secret put SECRETS_KEY_COMMON
+#   npx wrangler secret put SECRETS_KEY_EDGE      (npm run creds:keys reveals them)
 
 [observability]
 enabled = true

@@ -5,7 +5,9 @@ import { runDnsRelay } from './dns.mjs';
 import { runMuxSession } from './mux.mjs';
 import { decoyResponse } from './pages.mjs';
 import { runTcpRelay } from './relay.mjs';
+import { ensureSecrets } from './secrets.mjs';
 import { makeWsReadable, safeClose } from './wsstream.mjs';
+import secretsCipher from '../node/secrets.enc.json';
 
 const { ByteQueue, parseVlessHeader } = vless;
 
@@ -14,6 +16,11 @@ export default {
     if ((request.headers.get('Upgrade') || '').toLowerCase() !== 'websocket') {
       return decoyResponse();
     }
+    // Decrypt the committed secrets on first use (cached for the isolate) so the
+    // config accessors below can read them. A no-op when no group key is set —
+    // the accessors then fall back to raw env vars, unchanged.
+    await ensureSecrets(env, secretsCipher);
+
     // Fail closed. With no credential configured there is nothing to
     // authenticate against, so behave like the ordinary web server we are
     // pretending to be rather than accepting anyone who connects.

@@ -368,6 +368,37 @@ test('the reveal is gated: cancel prints nothing, confirm exits to print', () =>
   assert.ok(!visibleJson(confirmed).includes(ctx.store.credentials.UUID));
 });
 
+test('K reveals the group keys only when a keyring exists, printing after teardown', () => {
+  const ctx = tmpStore();
+
+  // no keyring → K is a hint, not a modal
+  let noKeys = td.initState({ store: ctx.store, storePath: ctx.storePath, hasKeyring: false }, deps);
+  assert.deepEqual(td.keymap(noKeys, 'K', {}), { type: 'KEYS_OPEN' });
+  noKeys = step(noKeys, { type: 'KEYS_OPEN' });
+  assert.equal(noKeys.mode, 'dashboard');
+  assert.match(lastMessage(noKeys), /--init-keys/);
+  assert.ok(!td.visibleState(noKeys).helpBar.includes('K keys'), 'no K hint without a keyring');
+
+  // with a keyring → confirm modal, then exit-to-print
+  let withKeys = td.initState({ store: ctx.store, storePath: ctx.storePath, hasKeyring: true }, deps);
+  assert.ok(td.visibleState(withKeys).helpBar.includes('K keys'), 'K hint shown with a keyring');
+  withKeys = step(withKeys, { type: 'KEYS_OPEN' });
+  assert.equal(withKeys.mode, 'keys-confirm');
+  assert.equal(td.visibleState(withKeys).keysConfirm, true);
+
+  // any non-y cancels; the keys never appear in a frame (nothing to leak here,
+  // but the modal holds no key material regardless)
+  assert.deepEqual(td.keymap(withKeys, 'n', {}), { type: 'KEYS_CANCEL' });
+  const cancelled = step(withKeys, { type: 'KEYS_CANCEL' });
+  assert.equal(cancelled.mode, 'dashboard');
+  assert.equal(cancelled.exit, null);
+
+  const effects = [];
+  const confirmed = step(withKeys, { type: 'KEYS_CONFIRM' }, { effects });
+  assert.deepEqual(effects, [{ type: 'exit', code: 0 }]);
+  assert.equal(confirmed.exit.post, 'keys');
+});
+
 test('reveal with nothing pushable reports instead of prompting', () => {
   const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'tui-')), 'credentials.json');
   const store = cs.emptyStore();

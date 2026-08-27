@@ -25,13 +25,14 @@ const CA_KEY = 'INTERCEPT_CA_FILE';
 // legitimate, which is why these are optional in the schema.
 const SETUP_SECRET_KEYS = ['ADMIN_TOKEN', 'PROVISION_SECRET'];
 
-export function initState({ store, storePath, pathLabel }, deps = defaultDeps) {
+export function initState({ store, storePath, pathLabel, hasKeyring = false }, deps = defaultDeps) {
   return {
     storePath,
     pathLabel: pathLabel || storePath,
     store,
+    hasKeyring,          // a local keyring exists → the group keys can be revealed
     cursor: 0,
-    mode: 'dashboard',   // dashboard | edit | ca-select | ca-path | reveal-confirm | setup-secrets
+    mode: 'dashboard',   // dashboard | edit | ca-select | ca-path | reveal-confirm | keys-confirm | setup-secrets
     edit: null,          // { key, buffer, error }
     caCursor: 0,
     setup: false,        // inside the quick-setup walk
@@ -41,7 +42,7 @@ export function initState({ store, storePath, pathLabel }, deps = defaultDeps) {
     showHelp: false,
     warnings: deps.warnings(store),
     reveal: null,
-    exit: null           // { code, post: null | 'reveal' }
+    exit: null           // { code, post: null | 'reveal' | 'keys' }
   };
 }
 
@@ -285,6 +286,23 @@ export function reduce(state, action, deps = defaultDeps) {
         effects: [{ type: 'exit', code: 0 }]
       };
 
+    case 'KEYS_OPEN':
+      // The group keys are secrets too; reveal them the same way — a confirm,
+      // then print after teardown. Nothing to reveal without a keyring.
+      if (!state.hasKeyring) {
+        return only(say(state, 'no keyring yet — run: node tools/credentials.mjs --init-keys', 'dim'));
+      }
+      return only({ ...state, mode: 'keys-confirm' });
+
+    case 'KEYS_CANCEL':
+      return only(say({ ...state, mode: 'dashboard' }, '(nothing printed)', 'dim'));
+
+    case 'KEYS_CONFIRM':
+      return {
+        state: { ...state, exit: { code: 0, post: 'keys' } },
+        effects: [{ type: 'exit', code: 0 }]
+      };
+
     case 'EXPORT':
       return { state, effects: [{ type: 'export-envs' }] };
 
@@ -389,6 +407,11 @@ export function keymap(state, input, key) {
     return { type: 'REVEAL_CANCEL' };
   }
 
+  if (state.mode === 'keys-confirm') {
+    if (input === 'y' || input === 'Y') return { type: 'KEYS_CONFIRM' };
+    return { type: 'KEYS_CANCEL' };
+  }
+
   if (state.mode === 'setup-secrets') {
     if (input === 'y' || input === 'Y') return { type: 'SETUP_SECRETS', yes: true };
     return { type: 'SETUP_SECRETS', yes: false };
@@ -401,6 +424,7 @@ export function keymap(state, input, key) {
   if (input === 'g') return { type: 'GENERATE' };
   if (input === 'c') return { type: 'CLEAR_FIELD' };
   if (input === 'p') return { type: 'REVEAL_OPEN' };
+  if (input === 'K') return { type: 'KEYS_OPEN' };
   if (input === 'e') return { type: 'EXPORT' };
   if (input === 'f') return { type: 'FRONT_PIN' };
   if (input === 'u') return { type: 'UNDO' };
@@ -422,6 +446,7 @@ function helpBar(state, setupAvailable) {
     case 'ca-select':
       return '↑↓/jk move · enter choose · 1/2/3 pick · esc back';
     case 'reveal-confirm':
+    case 'keys-confirm':
       return 'y print and exit · any other key cancel';
     case 'setup-secrets':
       return 'y generate · n skip';
@@ -435,7 +460,9 @@ function helpBar(state, setupAvailable) {
       if (f.generate) hints.push('g generate');
       if (!f.required && state.store.credentials[f.key] !== undefined) hints.push('c clear');
       if (setupAvailable) hints.push('S setup');
-      hints.push('p reveal', 'e export', 'f pin', 'u undo', '? help', 'q quit');
+      hints.push('p reveal');
+      if (state.hasKeyring) hints.push('K keys');
+      hints.push('e export', 'f pin', 'u undo', '? help', 'q quit');
       return hints.join(' · ');
     }
   }
@@ -523,6 +550,7 @@ export function visibleState(state) {
     editor,
     caSelect,
     reveal: state.mode === 'reveal-confirm' ? state.reveal : null,
+    keysConfirm: state.mode === 'keys-confirm',
     setupSecrets: state.mode === 'setup-secrets'
       ? { keys: SETUP_SECRET_KEYS.filter((k) => store.credentials[k] === undefined) }
       : null,

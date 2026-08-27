@@ -6,6 +6,12 @@
 app = 'isrky-edge'
 primary_region = 'ams'
 
+# Secrets are set with `fly secrets set`. Either the per-secret values
+# (UUID, WSPATH, ADMIN_TOKEN, PROVISION_SECRET, USERS) or — preferred, see
+# CREDENTIALS.md § Encrypted secrets — just the two group keys the server
+# decrypts the bundled src/node/secrets.enc.json with:
+#   fly secrets set SECRETS_KEY_COMMON=… SECRETS_KEY_SERVER=…   (npm run creds:keys)
+
 [build]
   dockerfile = 'Dockerfile'
 

@@ -10,6 +10,7 @@
 const vless = require('../vless.js');
 const { createUserRegistry, parseUserLabels } = require('./users.js');
 const { subkey } = require('./tokens.js');
+const { decryptSecrets } = require('./secrets.js');
 
 const { uuidToBytes } = vless;
 
@@ -43,6 +44,30 @@ function normalisePrefix(raw) {
  * on a platform that injects its own PORT while still being pinned explicitly.
  */
 function loadConfig(env = process.env) {
+  // Whether the operator opted into the encrypted secrets file (any group key
+  // set). Captured before the merge, though the keys survive it too.
+  const usingSecretsFile = Object.keys(env).some((k) => k.startsWith('SECRETS_KEY_'));
+
+  // Fill in any secrets carried by the committed encrypted file, for the groups
+  // this deployment holds a key for. An explicit env var still wins, so local
+  // overrides and tests are unaffected; with no keys set this is a no-op.
+  env = { ...decryptSecrets(env), ...env };
+
+  // Fail closed on a broken key. Unlike the Worker/Deno builds, the Node build
+  // has a published DEFAULT_UUID fallback for zero-config local use — which,
+  // when an operator meant to decrypt UUID from the file but the key is wrong
+  // or the file lacks it, would silently become an OPEN PROXY on a well-known
+  // credential. If a group key is set at all, refuse that fallback and stop the
+  // boot loudly rather than serve on the default. (Set UUID explicitly in env to
+  // opt out — an explicit value is honoured above.)
+  if (usingSecretsFile && !env.UUID) {
+    throw new Error(
+      'a SECRETS_KEY_* is set but UUID did not decrypt — refusing to fall back to the ' +
+      'published default UUID. Check the group key and src/node/secrets.enc.json, ' +
+      'or set UUID explicitly to override.'
+    );
+  }
+
   const uuid = env.UUID || DEFAULT_UUID;
 
   // Provisioned users are derived from a secret rather than stored, because Fly

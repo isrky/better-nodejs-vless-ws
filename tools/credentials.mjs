@@ -27,8 +27,14 @@ import {
   emptyStore, readStore, writeStore, storeMode, withField,
   redact, validateStore,
   parseLegacyEnv, planImport, pushPlan, publicHostWarnings, platformNames,
-  serializeEnv, writeEnvFile
+  serializeEnv, writeEnvFile, PLATFORM_GROUPS
 } from './credstore.mjs';
+
+import {
+  generateKeys, readKeyring, writeKeyring, encryptStore, decryptSecretsFile,
+  writeSecretsFile, readSecretsFile, platformKeys,
+  DEFAULT_KEYRING_PATH, SECRETS_FILE_PATH
+} from './credsecrets.mjs';
 
 const require = createRequire(import.meta.url);
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -42,6 +48,11 @@ const USAGE = `manage the credentials in local/credentials.json
   npm run creds:env                write local/deno.env for Deno Deploy import
   npm run creds:docker             write local/docker.env for the VPS compose stack
   npm run creds:pin                print FRONT_CERT_PIN for the VPS .env (probes the edge)
+  npm run creds:encrypt            re-encrypt the store into src/node/secrets.enc.json
+  npm run creds:decrypt            rebuild the local store from the committed file + keyring
+  npm run creds:keys               reveal the group keys to set once per platform
+  node tools/credentials.mjs --init-keys
+                                   generate the local keyring (local/secrets.keys.json)
   node tools/credentials.mjs --push --yes
                                    skip the confirmation (prints secrets)
   node tools/credentials.mjs --import PATH
@@ -362,6 +373,54 @@ function loadStoreOrEmpty(storePath) {
 }
 
 // ==========================================
+// Encrypted secrets
+// ==========================================
+
+/**
+ * Re-encrypt the store's shared secrets into the committed file, so it tracks
+ * the store. A no-op (returns null) when there is no keyring yet — the store
+ * still works locally; encryption is opt-in via `--init-keys`. Called after
+ * every edit in the TUI and by `--encrypt`.
+ */
+export function syncSecretsFile(store, keyringPath = DEFAULT_KEYRING_PATH, filePath = SECRETS_FILE_PATH) {
+  const keys = readKeyring(keyringPath);
+  if (!keys) return null;
+  writeSecretsFile(encryptStore(store, keys), filePath);
+  return filePath;
+}
+
+/**
+ * The group keys, grouped by the platform that needs each pair, with the
+ * set-once command per platform. These ARE secrets, so callers gate printing
+ * behind a confirmation exactly like the credential reveal.
+ */
+export function formatKeysReveal(keys, only = null) {
+  const how = {
+    fly: (n) => `fly secrets set ${n}=…`,
+    docker: (n) => `add ${n}=… to the Dockge stack's .env`,
+    wrangler: (n) => `wrangler secret put ${n}`,
+    deno: (n) => `set ${n} in the Deno Deploy dashboard`
+  };
+  const title = {
+    fly: 'Fly', docker: 'VPS / Docker', wrangler: 'Cloudflare Worker', deno: 'Deno Deploy'
+  };
+
+  const out = ['', 'Group keys — set each ONCE per platform.',
+    dim('  They do not change when you rotate a secret; only a key rotation re-sets them.'), ''];
+
+  for (const platform of Object.keys(PLATFORM_GROUPS)) {
+    if (only && platform !== only) continue;
+    out.push(bold(title[platform]));
+    for (const { envName, value } of platformKeys(platform, keys)) {
+      out.push(`  ${envName}=${value}`);
+      out.push(dim(`    ${how[platform](envName)}`));
+    }
+    out.push('');
+  }
+  return out.join('\n');
+}
+
+// ==========================================
 // CLI
 // ==========================================
 
@@ -430,6 +489,79 @@ async function main(argv) {
     const store = loadStoreOrEmpty(storePath);
     const pin = await printFrontPin(store, (s) => console.log(s));
     return pin ? 0 : 1;
+  }
+
+  const keyringPath = argValue(argv, '--keyring') || DEFAULT_KEYRING_PATH;
+  const secretsFilePath = argValue(argv, '--secrets-file') || SECRETS_FILE_PATH;
+
+  if (argv.includes('--init-keys')) {
+    // Generating a keyring over an existing one would orphan every value already
+    // encrypted under the old keys, so refuse unless forced.
+    if (existsSync(keyringPath) && !argv.includes('--force')) {
+      console.error(`error: ${keyringPath.replace(ROOT + '/', '')} already exists; ` +
+                    're-run with --force to replace it (re-encrypts everything under new keys)');
+      return 1;
+    }
+    const keys = generateKeys();
+    writeKeyring(keys, keyringPath);
+    console.log(`wrote ${keyringPath.replace(ROOT + '/', '')} (${storeMode(keyringPath)})`);
+    // Encrypt whatever is already in the store under the new keys.
+    const path = syncSecretsFile(loadStoreOrEmpty(storePath), keyringPath, secretsFilePath);
+    if (path) console.log(`encrypted the store into ${path.replace(ROOT + '/', '')}`);
+    console.log(dim('back this keyring up — without it, and without the plaintext store, ' +
+                    'the committed ciphertext is unrecoverable'));
+    return 0;
+  }
+
+  if (argv.includes('--encrypt')) {
+    // Writes only the committed ciphertext, never a plaintext secret — safe off a TTY.
+    const keys = readKeyring(keyringPath);
+    if (!keys) { console.error('error: no keyring — run: node tools/credentials.mjs --init-keys'); return 1; }
+    const path = writeSecretsFile(encryptStore(loadStoreOrEmpty(storePath), keys), secretsFilePath);
+    console.log(`wrote ${path.replace(ROOT + '/', '')}`);
+    return 0;
+  }
+
+  if (argv.includes('--decrypt')) {
+    // Rebuild the local plaintext store from the committed file (fresh clone).
+    // Writes only to the 0600 store, never to the terminal — safe off a TTY.
+    const keys = readKeyring(keyringPath);
+    if (!keys) { console.error('error: no keyring — you need the group keys to decrypt'); return 1; }
+    const file = readSecretsFile(secretsFilePath);
+    if (!file) { console.error(`error: no ${secretsFilePath.replace(ROOT + '/', '')} to decrypt`); return 1; }
+
+    const decrypted = decryptSecretsFile(file, keys);
+    let store = loadStoreOrEmpty(storePath);
+    for (const [key, value] of Object.entries(decrypted)) store = withField(store, key, value);
+    writeStore(storePath, store);
+    console.log(`rebuilt ${storePath.replace(ROOT + '/', '')} from ${Object.keys(decrypted).length} decrypted value(s)`);
+    return 0;
+  }
+
+  if (argv.includes('--keys')) {
+    // The keys ARE secrets, so this reveals — gate it exactly like --push.
+    const keys = readKeyring(keyringPath);
+    if (!keys) { console.error('error: no keyring — run: node tools/credentials.mjs --init-keys'); return 1; }
+    const only = argValue(argv, '--keys') && PLATFORM_GROUPS[argValue(argv, '--keys')]
+      ? argValue(argv, '--keys') : null;
+
+    if (argv.includes('--yes')) { console.log(formatKeysReveal(keys, only)); return 0; }
+    if (!process.stdin.isTTY) {
+      console.error('error: refusing to print keys without a confirmation; run it on a terminal, or pass --yes');
+      return 1;
+    }
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const answer = (await makeAsk(rl)('  Print the group keys to this terminal? [y/N] ')).toLowerCase();
+      if (answer !== 'y' && answer !== 'yes') { console.log('  (nothing printed)'); return 0; }
+      console.log(formatKeysReveal(keys, only));
+      return 0;
+    } catch (e) {
+      if (e instanceof Cancelled) { console.log('  (cancelled)'); return 130; }
+      throw e;
+    } finally {
+      rl.close();
+    }
   }
 
   if (argv.includes('--import')) {

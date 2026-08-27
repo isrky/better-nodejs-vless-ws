@@ -165,7 +165,70 @@ Once every key is covered, rename the old file rather than deleting it —
 >   `PROXYIP` — and passes them in `argv`, where `ps` can read them. Use
 >   `npm run creds:push` instead, which covers every pushable key.
 
+## Encrypted secrets & group keys
+
+Pasting every secret into four dashboards on every change is the drift-prone
+part. The alternative: keep the secrets **encrypted in git** and give each
+deployment only the keys to decrypt its own.
+
+`src/node/secrets.enc.json` is committed. Its values are AES-256-GCM ciphertext;
+its structure (group and field names) is cleartext, so it is safe in a public
+repo. Secrets are split into three groups, each with its own key:
+
+| group | fields | who holds the key |
+|---|---|---|
+| `common` | `UUID`, `WSPATH` | all four deployments |
+| `server` | `ADMIN_TOKEN`, `PROVISION_SECRET`, `PROVISION_SECRET_PREVIOUS`, `USERS` | Fly, VPS |
+| `edge` | `PROXYIP` | Worker, Deno |
+
+The three keys live locally in `local/secrets.keys.json` (gitignored, 0600) —
+the **keyring**. Each runtime decrypts on boot, reading its two keys from env
+vars (`SECRETS_KEY_COMMON` plus `SECRETS_KEY_SERVER` or `SECRETS_KEY_EDGE`) and
+the committed ciphertext bundled into its build. A deployment therefore holds
+only keys, never the secret values.
+
+**Set up once:**
+
+```bash
+node tools/credentials.mjs --init-keys   # generate the keyring, encrypt the store
+npm run creds:keys                        # reveal the two keys each platform needs
+```
+
+Set each platform's two keys once — `fly secrets set SECRETS_KEY_COMMON=… SECRETS_KEY_SERVER=…`,
+`wrangler secret put SECRETS_KEY_COMMON` / `SECRETS_KEY_EDGE`, the Deno dashboard,
+the VPS `.env`. They do **not** change when you rotate a secret.
+
+**Change a secret afterwards:** edit it in `npm run creds` (the dashboard
+re-encrypts `secrets.enc.json` on every save), `git commit && git push`, then
+`git pull` + redeploy each target. No re-pasting. `npm run creds:encrypt`
+re-encrypts on demand; `npm run creds:decrypt` rebuilds `local/credentials.json`
+from the committed file on a fresh clone (needs the keyring).
+
+**Rotating a group key** (not a secret — the key itself): `--init-keys --force`
+regenerates the whole keyring and re-encrypts, then re-set the keys on every
+platform. Because it re-keys all three groups, do it deliberately.
+
+> [!WARNING]
+> **Back up `local/secrets.keys.json`.** It is now as critical as the store:
+> lose the keyring *and* the plaintext store and the committed ciphertext is
+> unrecoverable — you are rotating everything.
+>
+> A missing or wrong key never crashes a deployment — it leaves those fields
+> unset. On the **Worker and Deno** builds that means the decoy (they have no
+> `UUID` default). On the **Node/Fly/VPS** build, an unset `UUID` falls back to
+> the *published* `DEFAULT_UUID`, i.e. an open proxy on a well-known credential
+> — so double-check `SECRETS_KEY_COMMON` on those targets, and set `UUID`
+> explicitly if you want a hard fail instead of that fallback.
+
+Per-deployment config that *differs* per target — `PUBLIC_HOST`, `FRONT_SNI`,
+the `*_HOST` fields, ports, `DOH_URL` — is deliberately **not** in the encrypted
+file (it cannot share one group key). It stays in `fly.toml` / `compose.yaml` /
+the dashboard, reviewable in git.
+
 ## Pushing to the dashboards
+
+The manual per-secret paste below still works, and is what you use if you have
+not adopted the encrypted-file flow above (or for a one-off).
 
 `npm run creds:push` shows what it is about to reveal, asks for a `y`, then
 prints every pushable value grouped by where it is pasted — with the Fly app and

@@ -101,6 +101,14 @@ function RevealConfirm({ reveal }) {
     </Box>`;
 }
 
+function KeysConfirm() {
+  return html`
+    <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX=${1} marginTop=${1}>
+      <Text bold>About to print the group keys to this terminal.</Text>
+      <Text dimColor>${'  '}Set each once per platform; they stay in your scrollback.</Text>
+    </Box>`;
+}
+
 function SetupSecrets({ offer }) {
   return html`
     <Box borderStyle="round" borderColor="yellow" paddingX=${1} marginTop=${1}>
@@ -144,6 +152,7 @@ export function Ui({ vs }) {
       ${vs.editor ? html`<${Editor} editor=${vs.editor} />` : null}
       ${vs.caSelect ? html`<${CaSelect} ca=${vs.caSelect} />` : null}
       ${vs.reveal ? html`<${RevealConfirm} reveal=${vs.reveal} />` : null}
+      ${vs.keysConfirm ? html`<${KeysConfirm} />` : null}
       ${vs.setupSecrets ? html`<${SetupSecrets} offer=${vs.setupSecrets} />` : null}
       <${Messages} messages=${vs.messages} />
       ${vs.legend ? html`<${Legend} legend=${vs.legend} />` : null}

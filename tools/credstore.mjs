@@ -262,6 +262,42 @@ export function field(key) {
   return BY_KEY.get(key) || null;
 }
 
+/**
+ * Which shared secrets go in which encrypted group. A group has one key; a
+ * deployment holds only its groups' keys and decrypts them at boot.
+ *
+ * The split is by audience — the set of deployments that need a value AND share
+ * the same value for it (a test asserts it matches the fields' pushTo targets):
+ *   common — UUID/WSPATH, identical on all four deployments
+ *   server — the provisioning/admin secrets, shared by Fly and the VPS
+ *   edge   — PROXYIP, shared by the Worker and Deno
+ *
+ * Per-deployment config that DIFFERS per target (PUBLIC_HOST, FRONT_SNI, the
+ * *_HOST fields) is deliberately not here — it cannot share one group key, so
+ * it stays platform config (fly.toml / compose .env) and a render input.
+ */
+export const GROUPS = {
+  common: ['UUID', 'WSPATH'],
+  server: ['ADMIN_TOKEN', 'PROVISION_SECRET', 'PROVISION_SECRET_PREVIOUS', 'USERS'],
+  edge: ['PROXYIP']
+};
+
+/** Which two group keys each deployment target needs. */
+export const PLATFORM_GROUPS = {
+  fly: ['common', 'server'],
+  docker: ['common', 'server'],
+  wrangler: ['common', 'edge'],
+  deno: ['common', 'edge']
+};
+
+/** The group a field belongs to, or null if it is not a shared secret. */
+export function groupOf(key) {
+  for (const [group, keys] of Object.entries(GROUPS)) {
+    if (keys.includes(key)) return group;
+  }
+  return null;
+}
+
 // ==========================================
 // Values
 // ==========================================

@@ -7,11 +7,11 @@ import { useReducer, useEffect, useRef } from 'react';
 import { useApp, useInput } from 'ink';
 import { html } from './h.mjs';
 import { initState, reduce, keymap, enrich, visibleState } from './reducer.mjs';
-import { writeStore, restoreBackup } from '../credstore.mjs';
-import { exportDenoEnv, exportDockerEnv, printFrontPin } from '../credentials.mjs';
+import { writeStore, restoreBackup, DEFAULT_STORE_PATH } from '../credstore.mjs';
+import { exportDenoEnv, exportDockerEnv, printFrontPin, syncSecretsFile } from '../credentials.mjs';
 import { Ui } from './components.mjs';
 
-const defaultIo = { writeStore, restoreBackup, exportDenoEnv, exportDockerEnv, printFrontPin };
+const defaultIo = { writeStore, restoreBackup, exportDenoEnv, exportDockerEnv, printFrontPin, syncSecretsFile };
 
 // Effects are appended with a sequence number and executed exactly once, so
 // React re-running the reducer or re-rendering cannot double-write the store.
@@ -22,11 +22,11 @@ function wrappedReducer(w, action) {
   return { state, seq: seq + effects.length, queue: [...w.queue, ...effects.map((eff) => ({ ...eff, seq: ++seq }))] };
 }
 
-export function App({ store, storePath, pathLabel, result, io: ioProp }) {
+export function App({ store, storePath, pathLabel, hasKeyring, result, io: ioProp }) {
   const { exit } = useApp();
   const io = ioProp || defaultIo;
 
-  const [w, dispatch] = useReducer(wrappedReducer, { store, storePath, pathLabel }, (init) => ({
+  const [w, dispatch] = useReducer(wrappedReducer, { store, storePath, pathLabel, hasKeyring }, (init) => ({
     state: initState(init), queue: [], seq: 0
   }));
 
@@ -40,6 +40,19 @@ export function App({ store, storePath, pathLabel, result, io: ioProp }) {
       case 'write-store':
         try {
           io.writeStore(storePath, eff.store);
+          // Keep the committed ciphertext in step with the store. Only for the
+          // canonical store — editing a scratch `--store` must never clobber the
+          // repo's committed file. A no-op until a keyring exists; a failure
+          // here must not lose the store write, so it only notes to the bar.
+          if (storePath === DEFAULT_STORE_PATH) {
+            try {
+              if (io.syncSecretsFile && io.syncSecretsFile(eff.store)) {
+                log('secrets.enc.json updated', 'dim');
+              }
+            } catch (e) {
+              log(`could not update secrets.enc.json: ${e.message}`, 'error');
+            }
+          }
         } catch (e) {
           dispatch({ type: 'WRITE_FAILED', message: e.message, rollback: eff.rollback });
         }

@@ -1,4 +1,5 @@
 import vless from '../vless.js';
+import { secretValue } from './secrets.mjs';
 
 const { uuidToBytes } = vless;
 
@@ -24,7 +25,11 @@ let cachedUuidBytes = null;
  * repository. Callers must treat null as "refuse to proxy".
  */
 export function getUuidBytes(env) {
-  const str = (env.UUID || '').trim();
+  // A decrypted secret (from the committed file, if this deployment holds the
+  // common key) takes precedence; otherwise fall back to a raw env var, so a
+  // deployment that has not adopted the encrypted file behaves as before.
+  // ensureSecrets(env, cipher) must have run first (see index.mjs / main.mjs).
+  const str = (secretValue('UUID') ?? env.UUID ?? '').trim();
   if (!str) {
     warnOnce('UUID is not configured — refusing all proxy requests. Set it with: wrangler secret put UUID');
     return null;
@@ -46,6 +51,7 @@ export function getUuidBytes(env) {
 
 // Matched as a substring of the request path, so a leading slash is optional.
 // Usually set as a secret rather than a committed var — see wrangler.toml.
-export const getWsPath = (env) => (env.WSPATH || '').trim() || '/';
-export const getProxyIp = (env) => (env.PROXYIP || '').trim();
+export const getWsPath = (env) => (secretValue('WSPATH') ?? env.WSPATH ?? '').trim() || '/';
+export const getProxyIp = (env) => (secretValue('PROXYIP') ?? env.PROXYIP ?? '').trim();
+// DOH_URL is per-deployment config, never a shared encrypted secret — env only.
 export const getDohUrl = (env) => env.DOH_URL || 'https://cloudflare-dns.com/dns-query';
