@@ -15,7 +15,7 @@
 import {
   FIELDS, field, redact, validateField, validateStore, withField,
   pushPlan, publicHostWarnings, platformNames, generate,
-  GROUPS, PLATFORM_GROUPS, groupOf, DEFAULT_STORE_PATH,
+  GROUPS, PLATFORM_GROUPS, PLATFORM_META, groupOf, DEFAULT_STORE_PATH,
   parseUserLabels, validateUserLabel, maxUserLabels
 } from '../credstore.mjs';
 
@@ -34,7 +34,10 @@ const NUKE_GENERATABLE_FIELDS = FIELDS.filter((f) => f.secret && f.generate);
 // can hold — per-deployment values that differ per target, which is exactly
 // why they are not shared secrets. Derived from the schema, so a new group in
 // credstore.mjs grows the tab bar here without any further change.
-export const TABS = [...Object.keys(GROUPS), 'config', 'nuke'];
+export const TABS = [...Object.keys(GROUPS), 'config', 'envs', 'nuke'];
+
+// The deployment targets the envs tab lists, in a stable order.
+const ENVS_TARGETS = Object.keys(PLATFORM_GROUPS);
 
 /** The tab a field belongs to: its encryption group, or 'config'. */
 export const tabOfKey = (key) => groupOf(key) || 'config';
@@ -62,6 +65,8 @@ export function initState({
     tabCursors: {},      // per-tab last cursor, so switching back returns where the operator left
     cursor: 0,
     nukeCursor: 0,
+    envsCursor: 0,
+    envsStatus: null,   // per-target env-file freshness map, filled by the check-envs effect
     canFullNuke,
     mode: 'dashboard',   // dashboard | field/user editors | confirms | nuke states
     nuke: null,          // { kind, input, error, rotatedFields? }
@@ -301,6 +306,10 @@ export function reduce(state, action, deps = defaultDeps) {
         const n = NUKE_CHOICES.length;
         return only({ ...state, nukeCursor: ((state.nukeCursor + action.delta) % n + n) % n });
       }
+      if (state.tab === 'envs') {
+        const n = ENVS_TARGETS.length;
+        return only({ ...state, envsCursor: ((state.envsCursor + action.delta) % n + n) % n });
+      }
       // Wrap around within the active tab: a tab is a complete view of its
       // fields, so k past the top returns to the tab's bottom rather than
       // drifting into another group. (A cursor outside its tab cannot happen
@@ -321,16 +330,20 @@ export function reduce(state, action, deps = defaultDeps) {
       const tab = TABS[((from + action.delta) % n + n) % n];
       const indices = tabIndices(tab);
       const saved = state.tabCursors[tab];
-      const cursor = tab === 'nuke' ? state.cursor : (indices.includes(saved) ? saved : indices[0]);
-      return only({
+      const cursor = (tab === 'nuke' || tab === 'envs') ? state.cursor : (indices.includes(saved) ? saved : indices[0]);
+      const next = {
         ...state,
         tab,
         cursor,
         mode: 'dashboard',
         nuke: null,
         users: null,
+        // Re-check freshness on every entry so files changed since last visit
+        // (e.g. after a key rotation) are caught; null shows 'checking…'.
+        envsStatus: tab === 'envs' ? null : state.envsStatus,
         tabCursors: { ...state.tabCursors, [state.tab]: state.cursor }
-      });
+      };
+      return { state: next, effects: tab === 'envs' ? [{ type: 'check-envs' }] : [] };
     }
 
     case 'OPEN_EDIT':
@@ -660,32 +673,31 @@ export function reduce(state, action, deps = defaultDeps) {
         effects: [{ type: 'exit', code: 0 }]
       };
 
-    case 'KEYS_OPEN':
-      // The group keys are secrets too; reveal the complete keyring behind one
-      // confirmation, then print only after teardown. This is global rather
-      // than tab-scoped because every deployment needs a pair of group keys.
-      if (!state.keyringGroups.length) {
-        return only(say(state, 'no keyring yet — run: node tools/credentials.mjs --init-keys', 'dim'));
-      }
-      {
-        const missing = Object.keys(GROUPS).filter((group) => !state.keyringGroups.includes(group));
-        if (missing.length) {
-          return only(say(state, `keyring is missing ${missing.join(', ')} — cannot print a partial set`, 'error'));
-        }
-      }
-      return only({ ...state, mode: 'keys-confirm' });
-
-    case 'KEYS_CANCEL':
-      return only(say({ ...state, mode: 'dashboard' }, '(nothing printed)', 'dim'));
-
-    case 'KEYS_CONFIRM':
-      return {
-        state: { ...state, exit: { code: 0, post: 'keys' } },
-        effects: [{ type: 'exit', code: 0 }]
-      };
-
     case 'EXPORT':
       return { state, effects: [{ type: 'export-envs' }] };
+
+    case 'COPY_ENV': {
+      // Copy the selected target's group-key block to the clipboard. The values
+      // are read from the keyring at effect time, never held in this state.
+      if (state.tab !== 'envs') return only(state);
+      const platform = ENVS_TARGETS[state.envsCursor];
+      const missing = PLATFORM_GROUPS[platform].filter((g) => !state.keyringGroups.includes(g));
+      if (missing.length) {
+        return only(say(state, `keyring is missing ${missing.join(', ')} — run: node tools/credentials.mjs --init-keys`, 'error'));
+      }
+      return { state, effects: [{ type: 'copy-env', platform }] };
+    }
+
+    case 'ENVS_STATUS':
+      return only({ ...state, envsStatus: action.status });
+
+    case 'UPDATE_ENVS': {
+      if (state.tab !== 'envs') return only(state);
+      const stale = Object.values(state.envsStatus || {}).some((s) => s === 'stale' || s === 'missing');
+      if (!stale) return only(say(state, 'env files already up to date', 'dim'));
+      // Rewrite all four (the export is idempotent for the fresh ones), then re-check.
+      return { state, effects: [{ type: 'export-envs' }, { type: 'check-envs' }] };
+    }
 
     case 'FRONT_PIN': {
       if (state.probe === 'pending') return only(state);
@@ -861,11 +873,6 @@ export function keymap(state, input, key) {
     return { type: 'REVEAL_CANCEL' };
   }
 
-  if (state.mode === 'keys-confirm') {
-    if (input === 'y' || input === 'Y') return { type: 'KEYS_CONFIRM' };
-    return { type: 'KEYS_CANCEL' };
-  }
-
   if (state.mode === 'setup-secrets') {
     if (input === 'y' || input === 'Y') return { type: 'SETUP_SECRETS', yes: true };
     return { type: 'SETUP_SECRETS', yes: false };
@@ -877,8 +884,18 @@ export function keymap(state, input, key) {
   if (key.tab) return { type: 'TAB_MOVE', delta: key.shift ? -1 : 1 };
   if (key.leftArrow || input === 'h') return { type: 'TAB_MOVE', delta: -1 };
   if (key.rightArrow || input === 'l') return { type: 'TAB_MOVE', delta: 1 };
-  if (key.return) return state.tab === 'nuke' ? { type: 'NUKE_OPEN' } : { type: 'OPEN_EDIT' };
-  if (input === 'K') return { type: 'KEYS_OPEN' };
+  if (key.return) {
+    if (state.tab === 'nuke') return { type: 'NUKE_OPEN' };
+    if (state.tab === 'envs') return { type: 'COPY_ENV' };
+    return { type: 'OPEN_EDIT' };
+  }
+  if (state.tab === 'envs') {
+    if (input === 'y' || input === 'c') return { type: 'COPY_ENV' };
+    if (input === 'u') return { type: 'UPDATE_ENVS' };
+    if (input === '?') return { type: 'TOGGLE_HELP' };
+    if (input === 'q') return { type: 'QUIT' };
+    return null;
+  }
   if (state.tab === 'nuke') {
     if (input === '?') return { type: 'TOGGLE_HELP' };
     if (input === 'q') return { type: 'QUIT' };
@@ -917,7 +934,6 @@ function helpBar(state, setupAvailable) {
     case 'ca-select':
       return '↑↓/jk move · enter choose · 1/2/3 pick · esc back';
     case 'reveal-confirm':
-    case 'keys-confirm':
       return 'y print and exit · any other key cancel';
     case 'setup-secrets':
       return 'y generate · n skip';
@@ -929,9 +945,12 @@ function helpBar(state, setupAvailable) {
       return 'enter/esc reset · ←→/hl tabs · q quit';
     default: {
       if (state.tab === 'nuke') {
-        const keys = Object.keys(GROUPS).every((group) => state.keyringGroups.includes(group))
-          ? ' · K all keys' : '';
-        return '↑↓/jk choose · enter select · ←→/hl tabs' + keys + ' · ? help · q quit';
+        return '↑↓/jk choose · enter select · ←→/hl tabs · ? help · q quit';
+      }
+      if (state.tab === 'envs') {
+        const stale = Object.values(state.envsStatus || {}).filter((s) => s === 'stale' || s === 'missing').length;
+        const update = stale ? ` · u update (${stale} out of date)` : '';
+        return '↑↓/jk choose · enter/y copy' + update + ' · ←→/hl tabs · ? help · q quit';
       }
       // Only advertise a keypress that would actually do something on the
       // highlighted field — pressing g on FRONT_SNI or c on UUID is a red
@@ -949,7 +968,6 @@ function helpBar(state, setupAvailable) {
       }
       if (setupAvailable) hints.push('S setup');
       hints.push('p reveal');
-      if (Object.keys(GROUPS).every((group) => state.keyringGroups.includes(group))) hints.push('K all keys');
       hints.push('e export', 'f pin', 'u undo', '? help', 'q quit');
       return hints.join(' · ');
     }
@@ -987,7 +1005,9 @@ export function visibleState(state) {
     ? 'per-deployment config — never encrypted, set per platform'
     : tab === 'nuke'
       ? 'assume compromise — rotate credentials or credentials + encryption keys'
-      : `${tab} — group key held by ${platformsOfGroup(tab).join(', ')}`;
+      : tab === 'envs'
+        ? "group-key env files — copy a target's block to the clipboard"
+        : `${tab} — group key held by ${platformsOfGroup(tab).join(', ')}`;
 
   // The tab bar: problems are counted per tab so a missing required field is
   // visible from every tab, not only the one it lives on.
@@ -1013,10 +1033,37 @@ export function visibleState(state) {
       selected: index === state.cursor
     };
   };
-  const activeGroup = state.tab === 'nuke' ? null : {
+  const activeGroup = (state.tab === 'nuke' || state.tab === 'envs') ? null : {
     label: tabLabel(state.tab),
     rows: tabIndices(state.tab).map(row)
   };
+
+  // The envs tab: which target is selected, which env-var names it needs, and
+  // whether its keyring groups exist. Never the key values — those are read at
+  // effect time when a row is copied, so no secret enters a frame.
+  const FRESHNESS = { ok: 'up to date', stale: 'stale', missing: 'not written' };
+  let envs = null;
+  if (state.tab === 'envs') {
+    const rows = ENVS_TARGETS.map((platform, index) => {
+      const groups = PLATFORM_GROUPS[platform];
+      const missing = groups.filter((g) => !state.keyringGroups.includes(g));
+      const disabled = missing.length > 0;
+      const status = state.envsStatus?.[platform] ?? null;
+      return {
+        platform,
+        title: PLATFORM_META[platform].title,
+        filename: PLATFORM_META[platform].envFile,
+        vars: groups.map((g) => 'SECRETS_KEY_' + g.toUpperCase()),
+        selected: index === state.envsCursor,
+        disabled,
+        missing,
+        status,
+        stale: status === 'stale' || status === 'missing',
+        freshness: FRESHNESS[status] ?? (disabled ? '' : 'checking…')
+      };
+    });
+    envs = { label: tabLabel('envs'), rows, staleCount: rows.filter((r) => r.stale).length };
+  }
 
   let nuke = null;
   if (state.tab === 'nuke') {
@@ -1122,6 +1169,7 @@ export function visibleState(state) {
     header: { path: state.pathLabel, version: store.version, problems: problems.size },
     tabs,
     activeGroup,
+    envs,
     nuke,
     warnings: state.warnings,
     setupAvailable,
@@ -1129,9 +1177,6 @@ export function visibleState(state) {
     userManager,
     caSelect,
     reveal: state.mode === 'reveal-confirm' ? state.reveal : null,
-    keysConfirm: state.mode === 'keys-confirm'
-      ? { groups: Object.keys(GROUPS), platforms: Object.keys(PLATFORM_GROUPS) }
-      : null,
     setupSecrets: state.mode === 'setup-secrets'
       ? { keys: SETUP_SECRET_KEYS.filter((k) => store.credentials[k] === undefined) }
       : null,

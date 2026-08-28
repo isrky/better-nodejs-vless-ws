@@ -22,7 +22,7 @@ export async function runTui({ storePath, store, pathLabel }) {
   );
   await instance.waitUntilExit();
 
-  // Secrets (and the group keys) print HERE, after Ink restores the terminal —
+  // The reveal's secret values print HERE, after Ink restores the terminal —
   // the single printing site, in normal scrollback, never an Ink frame.
   if (result.post === 'reveal') {
     const [{ formatReveal }, { pushPlan, platformNames }] = await Promise.all([
@@ -30,10 +30,6 @@ export async function runTui({ storePath, store, pathLabel }) {
       import('../credstore.mjs')
     ]);
     console.log(formatReveal(pushPlan(result.store), result.store, platformNames()));
-  } else if (result.post === 'keys') {
-    const { formatKeysReveal } = await import('../credentials.mjs');
-    const keys = readKeyring();
-    if (keys) console.log(formatKeysReveal(keys));
   }
   return result.code;
 }

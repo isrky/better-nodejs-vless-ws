@@ -9,14 +9,14 @@ import { html } from './h.mjs';
 import { initState, reduce, keymap, enrich, visibleState } from './reducer.mjs';
 import { writeStore, restoreBackup, DEFAULT_STORE_PATH } from '../credstore.mjs';
 import {
-  exportKeyEnvs, printFrontPin, syncSecretsFile,
+  exportKeyEnvs, copyEnvToClipboard, envFileStatus, printFrontPin, syncSecretsFile,
   commitCredentialNuke
 } from '../credentials.mjs';
 import { Ui, terminalTooSmall } from './components.mjs';
 
 const defaultIo = {
-  writeStore, restoreBackup, exportKeyEnvs, printFrontPin,
-  syncSecretsFile, commitCredentialNuke
+  writeStore, restoreBackup, exportKeyEnvs, copyEnvToClipboard, envFileStatus,
+  printFrontPin, syncSecretsFile, commitCredentialNuke
 };
 
 export function terminalViewport(stdout) {
@@ -96,6 +96,20 @@ export function App({ store, storePath, pathLabel, keyringGroups, result, io: io
       case 'export-envs':
         try {
           io.exportKeyEnvs(storePath, log);
+        } catch (e) {
+          log(e.message, 'error');
+        }
+        break;
+      case 'copy-env':
+        try {
+          io.copyEnvToClipboard(storePath, eff.platform, log);
+        } catch (e) {
+          log(e.message, 'error');
+        }
+        break;
+      case 'check-envs':
+        try {
+          dispatch({ type: 'ENVS_STATUS', status: io.envFileStatus(storePath) });
         } catch (e) {
           log(e.message, 'error');
         }

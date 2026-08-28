@@ -111,15 +111,15 @@ test('the cursor wraps around both ends of the active tab', () => {
 
 // ---------- the group tabs ----------
 
-test('the tabs are one per group plus config and nuke, and data tabs partition every field', () => {
+test('the tabs are one per group plus config, envs and nuke, and data tabs partition every field', () => {
   const state = init(tmpStore());
   assert.deepEqual(td.visibleState(state).tabs.map((t) => t.name),
-    [...Object.keys(cs.GROUPS), 'config', 'nuke']);
+    [...Object.keys(cs.GROUPS), 'config', 'envs', 'nuke']);
 
   // Each tab lists exactly its own fields; across all tabs every field
-  // appears exactly once.
+  // appears exactly once. The action tabs (envs, nuke) hold no fields.
   const seen = [];
-  for (const tab of td.TABS.filter((name) => name !== 'nuke')) {
+  for (const tab of td.TABS.filter((name) => name !== 'nuke' && name !== 'envs')) {
     const rows = td.visibleState({ ...state, tab }).activeGroup.rows;
     for (const f of cs.FIELDS) {
       const expected = td.tabOfKey(f.key) === tab;
@@ -131,6 +131,8 @@ test('the tabs are one per group plus config and nuke, and data tabs partition e
   assert.deepEqual(seen.sort(), cs.FIELDS.map((f) => f.key).sort());
   assert.equal(td.visibleState({ ...state, tab: 'nuke' }).activeGroup, null,
     'the action tab has no credential rows');
+  assert.equal(td.visibleState({ ...state, tab: 'envs' }).activeGroup, null,
+    'the envs tab has no credential rows');
 
   // The tab bar counts each tab's problems, so a broken field is visible
   // from every tab — here the empty store misses all four required fields,
@@ -177,9 +179,11 @@ test('switching tabs lands on the tab\'s fields and remembers where you were', (
   state = step(state, { type: 'TAB_MOVE', delta: -1 });    // back to common
   assert.equal(cs.FIELDS[state.cursor].key, 'WSPATH', 'common restores its cursor');
 
-  // The tabs wrap: left of common is nuke, then config.
+  // The tabs wrap: left of common is nuke, then envs, then config.
   state = step(state, { type: 'TAB_MOVE', delta: -1 });
   assert.equal(state.tab, 'nuke');
+  state = step(state, { type: 'TAB_MOVE', delta: -1 });
+  assert.equal(state.tab, 'envs');
   state = step(state, { type: 'TAB_MOVE', delta: -1 });
   assert.equal(state.tab, 'config');
   assert.equal(cs.FIELDS[state.cursor].key, 'FLY_HOST');
@@ -687,51 +691,6 @@ test('the reveal is gated: cancel prints nothing, confirm exits to print', () =>
   assert.ok(!visibleJson(confirmed).includes(ctx.store.credentials.UUID));
 });
 
-test('K reveals the complete keyring from every dashboard tab, printing after teardown', () => {
-  const ctx = tmpStore();
-  const groups = Object.keys(cs.GROUPS);
-
-  // No keyring: no advertised action and no modal.
-  let noKeys = td.initState({ store: ctx.store, storePath: ctx.storePath, keyringGroups: [] }, deps);
-  assert.ok(!td.visibleState(noKeys).helpBar.includes('K all keys'));
-  noKeys = step(noKeys, { type: 'KEYS_OPEN' });
-  assert.equal(noKeys.mode, 'dashboard');
-  assert.match(lastMessage(noKeys), /--init-keys/);
-
-  // A partial keyring refuses to print any subset.
-  const partial = td.initState({ store: ctx.store, storePath: ctx.storePath, keyringGroups: ['common'] }, deps);
-  const partialOpen = step(partial, { type: 'KEYS_OPEN' });
-  assert.equal(partialOpen.mode, 'dashboard');
-  assert.match(lastMessage(partialOpen), /missing server, edge/);
-
-  // A complete keyring makes K global, including config and the nuke tab.
-  const base = td.initState({ store: ctx.store, storePath: ctx.storePath, keyringGroups: groups }, deps);
-  for (const tab of td.TABS) {
-    const onTab = { ...base, tab };
-    assert.deepEqual(td.keymap(onTab, 'K', {}), { type: 'KEYS_OPEN' }, `${tab} maps K`);
-    assert.match(td.visibleState(onTab).helpBar, /K all keys/, `${tab} advertises K`);
-    const opened = step(onTab, { type: 'KEYS_OPEN' });
-    assert.equal(opened.mode, 'keys-confirm', `${tab} opens the confirmation`);
-    const confirm = td.visibleState(opened).keysConfirm;
-    assert.deepEqual(confirm.groups, groups);
-    assert.deepEqual(confirm.platforms, ['fly', 'docker', 'wrangler', 'deno']);
-  }
-
-  let withKeys = step(base, { type: 'KEYS_OPEN' });
-
-  // any non-y cancels; the keys never appear in a frame
-  assert.deepEqual(td.keymap(withKeys, 'n', {}), { type: 'KEYS_CANCEL' });
-  const cancelled = step(withKeys, { type: 'KEYS_CANCEL' });
-  assert.equal(cancelled.mode, 'dashboard');
-  assert.equal(cancelled.exit, null);
-
-  // y hands all printing to the post-teardown step.
-  const effects = [];
-  const confirmed = step(withKeys, { type: 'KEYS_CONFIRM' }, { effects });
-  assert.deepEqual(effects, [{ type: 'exit', code: 0 }]);
-  assert.deepEqual(confirmed.exit, { code: 0, post: 'keys' });
-});
-
 test('reveal with nothing pushable reports instead of prompting', () => {
   const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'tui-')), 'credentials.json');
   const store = cs.emptyStore();
@@ -750,6 +709,111 @@ test('e emits the export effect; the file writing itself is the tested helpers',
   const effects = [];
   step(state, { type: 'EXPORT' }, { effects });
   assert.deepEqual(effects, [{ type: 'export-envs' }]);
+});
+
+test('the envs tab lists the four targets with names, files, and vars but no values', () => {
+  const groups = Object.keys(cs.GROUPS);
+  const state = { ...td.initState({ ...tmpStore(), keyringGroups: groups }, deps), tab: 'envs' };
+  const vs = td.visibleState(state);
+
+  assert.equal(vs.activeGroup, null, 'the envs tab has no field rows');
+  assert.deepEqual(vs.envs.rows.map((r) => r.platform), ['fly', 'docker', 'wrangler', 'deno']);
+
+  const worker = vs.envs.rows.find((r) => r.platform === 'wrangler');
+  assert.equal(worker.title, 'Cloudflare Worker');
+  assert.equal(worker.filename, 'worker.env');
+  assert.deepEqual(worker.vars, ['SECRETS_KEY_COMMON', 'SECRETS_KEY_EDGE']);
+  assert.equal(worker.disabled, false);
+
+  assert.equal(vs.tabs.find((t) => t.name === 'envs').danger, false);
+});
+
+test('the envs tab: navigation, and enter/y copy the selected target', () => {
+  const groups = Object.keys(cs.GROUPS);
+  let state = { ...td.initState({ ...tmpStore(), keyringGroups: groups }, deps), tab: 'envs' };
+
+  assert.equal(state.envsCursor, 0);
+  assert.deepEqual(td.keymap(state, '', { return: true }), { type: 'COPY_ENV' });
+  assert.deepEqual(td.keymap(state, 'y', {}), { type: 'COPY_ENV' });
+  assert.deepEqual(td.keymap(state, 'j', {}), { type: 'MOVE', delta: 1 });
+
+  // Move onto the second target (docker) and copy it.
+  state = step(state, { type: 'MOVE', delta: 1 });
+  assert.equal(state.envsCursor, 1);
+  const effects = [];
+  step(state, { type: 'COPY_ENV' }, { effects });
+  assert.deepEqual(effects, [{ type: 'copy-env', platform: 'docker' }]);
+
+  // MOVE wraps within the four targets.
+  const wrapped = step(state, { type: 'MOVE', delta: -2 });
+  assert.equal(wrapped.envsCursor, 3);
+});
+
+test('copying a target refuses when its keyring groups are missing', () => {
+  // Only common present: wrangler/deno need edge, fly/docker need server.
+  let state = { ...td.initState({ ...tmpStore(), keyringGroups: ['common'] }, deps), tab: 'envs' };
+  const vs = td.visibleState(state);
+  assert.ok(vs.envs.rows.every((r) => r.disabled), 'every target is disabled without a complete keyring');
+
+  const effects = [];
+  state = step(state, { type: 'COPY_ENV' }, { effects });   // fly selected
+  assert.equal(effects.length, 0, 'nothing is copied');
+  assert.match(lastMessage(state), /keyring is missing server/);
+});
+
+test('entering the envs tab triggers a freshness check and nulls the old status', () => {
+  const groups = Object.keys(cs.GROUPS);
+  let state = td.initState({ ...tmpStore(), keyringGroups: groups }, deps);
+  state = { ...state, tab: 'config', envsStatus: { fly: 'ok', docker: 'ok', wrangler: 'ok', deno: 'ok' } };
+
+  const effects = [];
+  const entered = step(state, { type: 'TAB_MOVE', delta: 1 }, { effects });   // config → envs
+  assert.equal(entered.tab, 'envs');
+  assert.equal(entered.envsStatus, null, 'the stale status is cleared until re-checked');
+  assert.deepEqual(effects, [{ type: 'check-envs' }]);
+
+  // Leaving the tab emits no check.
+  const left = step(entered, { type: 'TAB_MOVE', delta: 1 }, { effects: [] });
+  assert.notEqual(left.tab, 'envs');
+});
+
+test('envs freshness surfaces per-row status, a stale count, and the update hint', () => {
+  const groups = Object.keys(cs.GROUPS);
+  let state = { ...td.initState({ ...tmpStore(), keyringGroups: groups }, deps), tab: 'envs' };
+
+  // Before any check, rows read "checking…" and the bar has no update hint.
+  let vs = td.visibleState(state);
+  assert.deepEqual(vs.envs.rows.map((r) => r.freshness), ['checking…', 'checking…', 'checking…', 'checking…']);
+  assert.equal(vs.envs.staleCount, 0);
+  assert.ok(!vs.helpBar.includes('u update'));
+
+  // A status map with two out of date drives the labels, count, and hint.
+  state = step(state, { type: 'ENVS_STATUS', status: { fly: 'ok', docker: 'stale', wrangler: 'missing', deno: 'ok' } });
+  vs = td.visibleState(state);
+  const byPlatform = Object.fromEntries(vs.envs.rows.map((r) => [r.platform, r.freshness]));
+  assert.deepEqual(byPlatform, { fly: 'up to date', docker: 'stale', wrangler: 'not written', deno: 'up to date' });
+  assert.equal(vs.envs.staleCount, 2);
+  assert.ok(vs.envs.rows.find((r) => r.platform === 'docker').stale);
+  assert.match(vs.helpBar, /u update \(2 out of date\)/);
+});
+
+test('u updates the env files only when something is stale, then re-checks', () => {
+  const groups = Object.keys(cs.GROUPS);
+  let state = { ...td.initState({ ...tmpStore(), keyringGroups: groups }, deps), tab: 'envs' };
+  assert.deepEqual(td.keymap(state, 'u', {}), { type: 'UPDATE_ENVS' });
+
+  // All up to date → no write, a dim note instead.
+  state = step(state, { type: 'ENVS_STATUS', status: { fly: 'ok', docker: 'ok', wrangler: 'ok', deno: 'ok' } });
+  let effects = [];
+  state = step(state, { type: 'UPDATE_ENVS' }, { effects });
+  assert.equal(effects.length, 0);
+  assert.match(lastMessage(state), /already up to date/);
+
+  // Something stale → rewrite all four, then re-check.
+  state = step(state, { type: 'ENVS_STATUS', status: { fly: 'ok', docker: 'stale', wrangler: 'ok', deno: 'ok' } });
+  effects = [];
+  step(state, { type: 'UPDATE_ENVS' }, { effects });
+  assert.deepEqual(effects, [{ type: 'export-envs' }, { type: 'check-envs' }]);
 });
 
 test('the probe runs once at a time and resets on completion', () => {
@@ -864,10 +928,6 @@ test('no secret value ever reaches anything the components render', () => {
   states.push(step(at(state, 'ADMIN_TOKEN'), { type: 'OPEN_EDIT' }));
   states.push(step(at(state, 'INTERCEPT_CA_FILE'), { type: 'OPEN_EDIT' }));
   states.push(step(state, { type: 'REVEAL_OPEN' }));
-  const withKeyring = td.initState({
-    store, storePath: p, keyringGroups: Object.keys(cs.GROUPS)
-  }, deps);
-  states.push(step(withKeyring, { type: 'KEYS_OPEN' }));
 
   for (const s of states) {
     const text = visibleJson(s);
