@@ -12,11 +12,12 @@ import {
   exportKeyEnvs, copyEnvToClipboard, envFileStatus, printFrontPin, syncSecretsFile,
   commitCredentialNuke
 } from '../credentials.mjs';
+import { secretsGitStatus, gitCommitPush } from '../git.mjs';
 import { Ui, terminalTooSmall } from './components.mjs';
 
 const defaultIo = {
   writeStore, restoreBackup, exportKeyEnvs, copyEnvToClipboard, envFileStatus,
-  printFrontPin, syncSecretsFile, commitCredentialNuke
+  printFrontPin, syncSecretsFile, commitCredentialNuke, secretsGitStatus, gitCommitPush
 };
 
 export function terminalViewport(stdout) {
@@ -112,6 +113,23 @@ export function App({ store, storePath, pathLabel, keyringGroups, result, io: io
           dispatch({ type: 'ENVS_STATUS', status: io.envFileStatus(storePath) });
         } catch (e) {
           log(e.message, 'error');
+        }
+        break;
+      case 'git-status':
+        try {
+          dispatch({ type: 'GIT_STATUS', status: await io.secretsGitStatus() });
+        } catch (e) {
+          log(e.message, 'error');
+          dispatch({ type: 'GIT_STATUS', status: null });
+        }
+        break;
+      case 'git-commit-push':
+        try {
+          await io.gitCommitPush(log);
+        } catch (e) {
+          log(e.message, 'error');
+        } finally {
+          dispatch({ type: 'GIT_DONE' });
         }
         break;
       case 'probe-pin':

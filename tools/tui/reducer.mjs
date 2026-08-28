@@ -34,7 +34,7 @@ const NUKE_GENERATABLE_FIELDS = FIELDS.filter((f) => f.secret && f.generate);
 // can hold — per-deployment values that differ per target, which is exactly
 // why they are not shared secrets. Derived from the schema, so a new group in
 // credstore.mjs grows the tab bar here without any further change.
-export const TABS = [...Object.keys(GROUPS), 'config', 'envs', 'nuke'];
+export const TABS = [...Object.keys(GROUPS), 'config', 'envs', 'push', 'nuke'];
 
 // The deployment targets the envs tab lists, in a stable order.
 const ENVS_TARGETS = Object.keys(PLATFORM_GROUPS);
@@ -67,6 +67,8 @@ export function initState({
     nukeCursor: 0,
     envsCursor: 0,
     envsStatus: null,   // per-target env-file freshness map, filled by the check-envs effect
+    gitStatus: null,    // secrets-file git state { file, branch, upstream, ahead, behind }, filled by git-status
+    gitBusy: false,     // a commit+push is in flight
     canFullNuke,
     mode: 'dashboard',   // dashboard | field/user editors | confirms | nuke states
     nuke: null,          // { kind, input, error, rotatedFields? }
@@ -315,6 +317,7 @@ export function reduce(state, action, deps = defaultDeps) {
         const n = ENVS_TARGETS.length;
         return only({ ...state, envsCursor: ((state.envsCursor + action.delta) % n + n) % n });
       }
+      if (state.tab === 'push') return only(state);   // a single status panel, nothing to move over
       // Wrap around within the active tab: a tab is a complete view of its
       // fields, so k past the top returns to the tab's bottom rather than
       // drifting into another group. (A cursor outside its tab cannot happen
@@ -335,7 +338,7 @@ export function reduce(state, action, deps = defaultDeps) {
       const tab = TABS[((from + action.delta) % n + n) % n];
       const indices = tabIndices(tab);
       const saved = state.tabCursors[tab];
-      const cursor = (tab === 'nuke' || tab === 'envs') ? state.cursor : (indices.includes(saved) ? saved : indices[0]);
+      const cursor = (tab === 'nuke' || tab === 'envs' || tab === 'push') ? state.cursor : (indices.includes(saved) ? saved : indices[0]);
       const next = {
         ...state,
         tab,
@@ -343,12 +346,16 @@ export function reduce(state, action, deps = defaultDeps) {
         mode: 'dashboard',
         nuke: null,
         users: null,
-        // Re-check freshness on every entry so files changed since last visit
-        // (e.g. after a key rotation) are caught; null shows 'checking…'.
+        // Re-check freshness/git state on every entry so changes since the last
+        // visit are caught; null shows 'checking…'.
         envsStatus: tab === 'envs' ? null : state.envsStatus,
+        gitStatus: tab === 'push' ? null : state.gitStatus,
         tabCursors: { ...state.tabCursors, [state.tab]: state.cursor }
       };
-      return { state: next, effects: tab === 'envs' ? [{ type: 'check-envs' }] : [] };
+      const entry = tab === 'envs' ? [{ type: 'check-envs' }]
+        : tab === 'push' ? [{ type: 'git-status' }]
+          : [];
+      return { state: next, effects: entry };
     }
 
     case 'OPEN_EDIT':
@@ -704,6 +711,29 @@ export function reduce(state, action, deps = defaultDeps) {
       return { state, effects: [{ type: 'export-envs' }, { type: 'check-envs' }] };
     }
 
+    case 'GIT_STATUS':
+      return only({ ...state, gitStatus: action.status });
+
+    case 'PUSH_OPEN': {
+      if (state.tab !== 'push' || state.gitBusy) return only(state);
+      const s = state.gitStatus;
+      if (s && s.file === 'clean' && s.ahead === 0) {
+        return only(say(state, 'nothing to commit or push', 'dim'));
+      }
+      return only({ ...state, mode: 'push-confirm' });
+    }
+
+    case 'PUSH_CANCEL':
+      return only({ ...state, mode: 'dashboard' });
+
+    case 'PUSH_CONFIRM':
+      if (state.mode !== 'push-confirm') return only(state);
+      return { state: { ...state, mode: 'dashboard', gitBusy: true }, effects: [{ type: 'git-commit-push' }] };
+
+    case 'GIT_DONE':
+      // Refresh the panel after the commit+push settles.
+      return { state: { ...state, gitBusy: false }, effects: [{ type: 'git-status' }] };
+
     case 'FRONT_PIN': {
       if (state.probe === 'pending') return only(state);
       return { state: { ...state, probe: 'pending' }, effects: [{ type: 'probe-pin' }] };
@@ -878,6 +908,11 @@ export function keymap(state, input, key) {
     return { type: 'REVEAL_CANCEL' };
   }
 
+  if (state.mode === 'push-confirm') {
+    if (input === 'y' || input === 'Y') return { type: 'PUSH_CONFIRM' };
+    return { type: 'PUSH_CANCEL' };
+  }
+
   if (state.mode === 'setup-secrets') {
     if (input === 'y' || input === 'Y') return { type: 'SETUP_SECRETS', yes: true };
     return { type: 'SETUP_SECRETS', yes: false };
@@ -892,11 +927,17 @@ export function keymap(state, input, key) {
   if (key.return) {
     if (state.tab === 'nuke') return { type: 'NUKE_OPEN' };
     if (state.tab === 'envs') return { type: 'COPY_ENV' };
+    if (state.tab === 'push') return { type: 'PUSH_OPEN' };
     return { type: 'OPEN_EDIT' };
   }
   if (state.tab === 'envs') {
     if (input === 'y' || input === 'c') return { type: 'COPY_ENV' };
     if (input === 'u') return { type: 'UPDATE_ENVS' };
+    if (input === '?') return { type: 'TOGGLE_HELP' };
+    if (input === 'q') return { type: 'QUIT' };
+    return null;
+  }
+  if (state.tab === 'push') {
     if (input === '?') return { type: 'TOGGLE_HELP' };
     if (input === 'q') return { type: 'QUIT' };
     return null;
@@ -940,6 +981,8 @@ function helpBar(state, setupAvailable) {
       return '↑↓/jk move · enter choose · 1/2/3 pick · esc back';
     case 'reveal-confirm':
       return 'y print and exit · any other key cancel';
+    case 'push-confirm':
+      return 'y commit & push · any other key cancel';
     case 'setup-secrets':
       return 'y generate · n skip';
     case 'nuke-confirm':
@@ -956,6 +999,11 @@ function helpBar(state, setupAvailable) {
         const stale = Object.values(state.envsStatus || {}).filter((s) => s === 'stale' || s === 'missing').length;
         const update = stale ? ` · u update (${stale} out of date)` : '';
         return '↑↓/jk choose · enter/y copy' + update + ' · ←→/hl tabs · ? help · q quit';
+      }
+      if (state.tab === 'push') {
+        return state.gitBusy
+          ? 'pushing — do not quit'
+          : 'enter commit & push · ←→/hl tabs · ? help · q quit';
       }
       // Only advertise a keypress that would actually do something on the
       // highlighted field — pressing g on FRONT_SNI or c on UUID is a red
@@ -987,11 +1035,12 @@ const LEGEND = [
   ['c', 'clear the highlighted optional field (USERS confirms deleting everyone)'],
   ['S', 'quick setup: generate what can be generated, then walk the required hosts'],
   ['p', 'reveal the secrets to paste into the dashboards (confirms, then exits)'],
-  ['K', 'reveal all group keys in paste-ready platform blocks (confirms, then exits)'],
-  ['e', 'export the Deno and Docker group-key env files (0600, no values announced)'],
+  ['e', 'export the four group-key env files (0600, no values announced)'],
   ['f', 'probe the VPS edge and print FRONT_CERT_PIN'],
   ['u', 'undo the last change (restores the .bak)'],
   ['r', 'how to render the client configs'],
+  ['envs tab', "copy a target's group-key block to the clipboard; u rewrites stale files"],
+  ['push tab', 'commit and push src/node/secrets.enc.json to the remote'],
   ['nuke tab', 'soft rotates credentials; full also replaces every encryption-group key'],
   ['q', 'quit']
 ];
@@ -1012,7 +1061,9 @@ export function visibleState(state) {
       ? 'assume compromise — rotate credentials or credentials + encryption keys'
       : tab === 'envs'
         ? "group-key env files — copy a target's block to the clipboard"
-        : `${tab} — group key held by ${platformsOfGroup(tab).join(', ')}`;
+        : tab === 'push'
+          ? 'commit and push the encrypted secrets to the remote'
+          : `${tab} — group key held by ${platformsOfGroup(tab).join(', ')}`;
 
   // The tab bar: problems are counted per tab so a missing required field is
   // visible from every tab, not only the one it lives on.
@@ -1038,7 +1089,7 @@ export function visibleState(state) {
       selected: index === state.cursor
     };
   };
-  const activeGroup = (state.tab === 'nuke' || state.tab === 'envs') ? null : {
+  const activeGroup = (state.tab === 'nuke' || state.tab === 'envs' || state.tab === 'push') ? null : {
     label: tabLabel(state.tab),
     rows: tabIndices(state.tab).map(row)
   };
@@ -1068,6 +1119,21 @@ export function visibleState(state) {
       };
     });
     envs = { label: tabLabel('envs'), rows, staleCount: rows.filter((r) => r.stale).length };
+  }
+
+  // The push tab: the git state of the secrets file. Branch names, counts, and
+  // enums only — the file's ciphertext is never read into a frame.
+  let push = null;
+  if (state.tab === 'push') {
+    const s = state.gitStatus;
+    push = {
+      label: tabLabel('push'),
+      file: 'src/node/secrets.enc.json',
+      status: s,
+      busy: state.gitBusy,
+      confirm: state.mode === 'push-confirm',
+      nothingToDo: s ? (s.file === 'clean' && s.ahead === 0) : false
+    };
   }
 
   let nuke = null;
@@ -1175,6 +1241,7 @@ export function visibleState(state) {
     tabs,
     activeGroup,
     envs,
+    push,
     nuke,
     warnings: state.warnings,
     setupAvailable,

@@ -165,6 +165,31 @@ function Envs({ envs, compact }) {
     </Box>`;
 }
 
+function Push({ push }) {
+  const s = push.status;
+  const remote = s
+    ? (s.upstream
+        ? `${s.branch} → ${s.upstream} · ${s.ahead} ahead, ${s.behind} behind`
+        : `${s.branch} · no upstream configured`)
+    : 'checking git status…';
+  const fileState = s ? (s.file === 'modified' ? 'uncommitted changes' : 'committed') : '';
+  const summary = push.busy
+    ? 'pushing…'
+    : s
+      ? (push.nothingToDo ? 'nothing to commit or push' : 'enter to commit & push')
+      : '';
+  return html`
+    <Box flexDirection="column" width="100%" overflow="hidden" marginTop=${1}>
+      <Text dimColor wrap="truncate-end">${'  '}${push.label}</Text>
+      <Text wrap="truncate-end">${'  '}${push.file}</Text>
+      <Text dimColor wrap="truncate-end">${'  '}${remote}</Text>
+      ${s ? html`<Text dimColor=${s.file !== 'modified'} color=${s.file === 'modified' ? 'yellow' : undefined} wrap="truncate-end">${'  '}${fileState}</Text>` : null}
+      ${push.confirm
+        ? html`<${Frame} color="yellow"><Text wrap="truncate-end">commit & push ${push.file}? (y/N)</Text><//>`
+        : html`<Text color=${push.busy ? 'yellow' : undefined} dimColor=${!push.busy} wrap="truncate-end">${'  '}${summary}</Text>`}
+    </Box>`;
+}
+
 function Frame({ color, children }) {
   return html`
     <Box flexDirection="column" width="100%" overflow="hidden"
@@ -358,6 +383,7 @@ function PrimaryBody({ vs, viewport, compact }) {
   if (vs.setupSecrets) return html`<${SetupSecrets} offer=${vs.setupSecrets} />`;
   if (vs.nuke) return html`<${Nuke} nuke=${vs.nuke} compact=${compact} />`;
   if (vs.envs) return html`<${Envs} envs=${vs.envs} compact=${compact} />`;
+  if (vs.push) return html`<${Push} push=${vs.push} />`;
   return vs.activeGroup
     ? html`<${Group} group=${vs.activeGroup} viewport=${viewport} compact=${compact} />`
     : null;
@@ -376,7 +402,7 @@ export function Ui({ vs, viewport = { columns: 80, rows: 24 } }) {
 
   const compact = viewport.columns < 72;
   const modal = Boolean(vs.legend || vs.userManager || vs.editor || vs.caSelect || vs.reveal || vs.setupSecrets ||
-    vs.nuke?.confirm || vs.nuke?.running || vs.nuke?.done);
+    vs.nuke?.confirm || vs.nuke?.running || vs.nuke?.done || vs.push?.confirm);
 
   return html`
     <Box flexDirection="column" width=${viewport.columns} height=${viewport.rows}

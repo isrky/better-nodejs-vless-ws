@@ -111,15 +111,15 @@ test('the cursor wraps around both ends of the active tab', () => {
 
 // ---------- the group tabs ----------
 
-test('the tabs are one per group plus config, envs and nuke, and data tabs partition every field', () => {
+test('the tabs are one per group plus config, envs, push and nuke, and data tabs partition every field', () => {
   const state = init(tmpStore());
   assert.deepEqual(td.visibleState(state).tabs.map((t) => t.name),
-    [...Object.keys(cs.GROUPS), 'config', 'envs', 'nuke']);
+    [...Object.keys(cs.GROUPS), 'config', 'envs', 'push', 'nuke']);
 
   // Each tab lists exactly its own fields; across all tabs every field
-  // appears exactly once. The action tabs (envs, nuke) hold no fields.
+  // appears exactly once. The action tabs (envs, push, nuke) hold no fields.
   const seen = [];
-  for (const tab of td.TABS.filter((name) => name !== 'nuke' && name !== 'envs')) {
+  for (const tab of td.TABS.filter((name) => !['nuke', 'envs', 'push'].includes(name))) {
     const rows = td.visibleState({ ...state, tab }).activeGroup.rows;
     for (const f of cs.FIELDS) {
       const expected = td.tabOfKey(f.key) === tab;
@@ -133,6 +133,8 @@ test('the tabs are one per group plus config, envs and nuke, and data tabs parti
     'the action tab has no credential rows');
   assert.equal(td.visibleState({ ...state, tab: 'envs' }).activeGroup, null,
     'the envs tab has no credential rows');
+  assert.equal(td.visibleState({ ...state, tab: 'push' }).activeGroup, null,
+    'the push tab has no credential rows');
 
   // The tab bar counts each tab's problems, so a broken field is visible
   // from every tab — here the empty store misses all four required fields,
@@ -179,9 +181,11 @@ test('switching tabs lands on the tab\'s fields and remembers where you were', (
   state = step(state, { type: 'TAB_MOVE', delta: -1 });    // back to common
   assert.equal(cs.FIELDS[state.cursor].key, 'WSPATH', 'common restores its cursor');
 
-  // The tabs wrap: left of common is nuke, then envs, then config.
+  // The tabs wrap: left of common is nuke, then push, then envs, then config.
   state = step(state, { type: 'TAB_MOVE', delta: -1 });
   assert.equal(state.tab, 'nuke');
+  state = step(state, { type: 'TAB_MOVE', delta: -1 });
+  assert.equal(state.tab, 'push');
   state = step(state, { type: 'TAB_MOVE', delta: -1 });
   assert.equal(state.tab, 'envs');
   state = step(state, { type: 'TAB_MOVE', delta: -1 });
@@ -851,6 +855,87 @@ test('u updates the env files only when something is stale, then re-checks', () 
   effects = [];
   step(state, { type: 'UPDATE_ENVS' }, { effects });
   assert.deepEqual(effects, [{ type: 'export-envs' }, { type: 'check-envs' }]);
+});
+
+// ---------- the push tab ----------
+
+test('entering the push tab checks git status and nulls it; MOVE is a no-op there', () => {
+  // envs → push (one tab right) emits a git-status effect and clears the status.
+  const from = { ...init(tmpStore()), tab: 'envs',
+    gitStatus: { file: 'clean', branch: 'main', upstream: 'origin/main', ahead: 0, behind: 0 } };
+  const effects = [];
+  const entered = step(from, { type: 'TAB_MOVE', delta: 1 }, { effects });
+  assert.equal(entered.tab, 'push');
+  assert.equal(entered.gitStatus, null, 'status is cleared until re-checked');
+  assert.deepEqual(effects, [{ type: 'git-status' }]);
+
+  // MOVE on the push tab changes nothing (it has no list to navigate).
+  const s = { file: 'modified', branch: 'main', upstream: 'origin/main', ahead: 1, behind: 0 };
+  const moved = step({ ...entered, gitStatus: s }, { type: 'MOVE', delta: 1 });
+  assert.deepEqual(moved.gitStatus, s);
+});
+
+test('the push tab: enter opens the confirm only when there is something to do', () => {
+  const base = { ...init(tmpStore()), tab: 'push' };
+  assert.deepEqual(td.keymap(base, '', { return: true }), { type: 'PUSH_OPEN' });
+
+  // Clean + not ahead → nothing to do, no confirm.
+  let clean = step({ ...base, gitStatus: { file: 'clean', branch: 'main', upstream: 'origin/main', ahead: 0, behind: 0 } },
+    { type: 'PUSH_OPEN' });
+  assert.equal(clean.mode, 'dashboard');
+  assert.match(lastMessage(clean), /nothing to commit or push/);
+
+  // Uncommitted changes → confirm.
+  let dirty = step({ ...base, gitStatus: { file: 'modified', branch: 'main', upstream: 'origin/main', ahead: 0, behind: 0 } },
+    { type: 'PUSH_OPEN' });
+  assert.equal(dirty.mode, 'push-confirm');
+
+  // Committed but ahead → confirm.
+  let ahead = step({ ...base, gitStatus: { file: 'clean', branch: 'main', upstream: 'origin/main', ahead: 3, behind: 0 } },
+    { type: 'PUSH_OPEN' });
+  assert.equal(ahead.mode, 'push-confirm');
+});
+
+test('the push confirm: y commits & pushes, other keys cancel', () => {
+  const confirming = { ...init(tmpStore()), tab: 'push', mode: 'push-confirm',
+    gitStatus: { file: 'modified', branch: 'main', upstream: 'origin/main', ahead: 0, behind: 0 } };
+  assert.deepEqual(td.keymap(confirming, 'y', {}), { type: 'PUSH_CONFIRM' });
+  assert.deepEqual(td.keymap(confirming, 'n', {}), { type: 'PUSH_CANCEL' });
+
+  const effects = [];
+  const busy = step(confirming, { type: 'PUSH_CONFIRM' }, { effects });
+  assert.equal(busy.mode, 'dashboard');
+  assert.equal(busy.gitBusy, true);
+  assert.deepEqual(effects, [{ type: 'git-commit-push' }]);
+
+  const cancelled = step(confirming, { type: 'PUSH_CANCEL' });
+  assert.equal(cancelled.mode, 'dashboard');
+
+  // GIT_DONE clears busy and refreshes.
+  const doneEffects = [];
+  const done = step(busy, { type: 'GIT_DONE' }, { effects: doneEffects });
+  assert.equal(done.gitBusy, false);
+  assert.deepEqual(doneEffects, [{ type: 'git-status' }]);
+});
+
+test('the push view model and help bar reflect git state and busy', () => {
+  const base = { ...init(tmpStore()), tab: 'push' };
+
+  // Unchecked: no status yet, help bar advertises commit & push.
+  let vs = td.visibleState(base);
+  assert.equal(vs.push.status, null);
+  assert.equal(vs.push.busy, false);
+  assert.match(vs.helpBar, /enter commit & push/);
+
+  // A modified/ahead status surfaces; nothingToDo is false.
+  const s = { file: 'modified', branch: 'main', upstream: 'origin/main', ahead: 1, behind: 0 };
+  vs = td.visibleState(step(base, { type: 'GIT_STATUS', status: s }));
+  assert.deepEqual(vs.push.status, s);
+  assert.equal(vs.push.nothingToDo, false);
+
+  // Busy shows the pushing hint.
+  vs = td.visibleState({ ...base, gitBusy: true });
+  assert.match(vs.helpBar, /pushing — do not quit/);
 });
 
 test('the probe runs once at a time and resets on completion', () => {

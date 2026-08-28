@@ -55,6 +55,12 @@ function states() {
     ['envs tab', { ...base, tab: 'envs', keyringGroups: Object.keys(cs.GROUPS),
       envsStatus: { fly: 'ok', docker: 'stale', wrangler: 'missing', deno: 'ok' } }],
     ['envs tab (no keyring)', { ...base, tab: 'envs', keyringGroups: [] }],
+    ['push tab', { ...base, tab: 'push',
+      gitStatus: { file: 'modified', branch: 'main', upstream: 'origin/main', ahead: 2, behind: 1 } }],
+    ['push confirm', { ...base, tab: 'push', mode: 'push-confirm',
+      gitStatus: { file: 'modified', branch: 'main', upstream: 'origin/main', ahead: 0, behind: 0 } }],
+    ['push busy', { ...base, tab: 'push', gitBusy: true,
+      gitStatus: { file: 'clean', branch: 'main', upstream: null, ahead: 0, behind: 0 } }],
     ['nuke choices', { ...base, tab: 'nuke' }],
     ['editor', { ...base, tab: 'edge', cursor: proxy, mode: 'edit', edit: {
       key: 'PROXYIP', buffer: 'a-long-edited-hostname.example.invalid', caret: 18, error: null

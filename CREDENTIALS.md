@@ -273,10 +273,14 @@ and `npm run creds:keys` prints the same four blocks to the terminal. These
 without the complete keyring.
 
 **Change a secret afterwards:** edit it in `npm run creds` (the dashboard
-re-encrypts `secrets.enc.json` on every save), `git commit && git push`, then
-`git pull` + redeploy each target. No re-pasting. `npm run creds:encrypt`
-re-encrypts on demand; `npm run creds:decrypt` rebuilds `local/credentials.json`
-from the committed file on a fresh clone (needs the keyring).
+re-encrypts `secrets.enc.json` on every save), commit and push the encrypted
+file, then `git pull` + redeploy each target. No re-pasting. The `push` tab
+does the commit and push for you: it shows whether `src/node/secrets.enc.json`
+is uncommitted or unpushed and, on `enter` then `y`, commits just that file
+(message "Update encrypted secrets") and pushes — the git state (branch,
+ahead/behind) is read on entry, and the file's contents never appear on screen.
+`npm run creds:encrypt` re-encrypts on demand; `npm run creds:decrypt` rebuilds
+`local/credentials.json` from the committed file on a fresh clone (needs the keyring).
 
 **Rotating a group key** (not a secret — the key itself): `--init-keys --force`
 regenerates the whole keyring and re-encrypts, then re-set the keys on every
