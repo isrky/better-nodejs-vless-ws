@@ -238,9 +238,19 @@ only keys, never the secret values.
 
 The dashboard mirrors this split: one tab per group (`common`, `server`,
 `edge`) plus a `config` tab for the per-deployment fields, so every field
-lives in exactly one tab and the tab bar counts each tab's problems. `K` from
-any dashboard tab confirms, exits the TUI, then prints all keys in paste-ready
-Fly, VPS/Docker, Worker, and Deno blocks.
+lives in exactly one tab and the tab bar counts each tab's problems. An `envs`
+tab lists the four deployment targets; `enter`/`y` copies that target's
+group-key block (`SECRETS_KEY_*=…`) to the clipboard — over SSH via the OSC 52
+terminal escape so it lands on your *local* clipboard, or through a local
+`wl-copy`/`xclip`/`pbcopy` when a display is present. The key values never
+render on screen (they are read from the keyring only at copy time), and a
+target whose keyring groups are missing refuses to copy.
+
+Opening the tab also checks each written file (`local/*.env`) against the
+current keyring and marks it **up to date**, **stale**, or **not written** —
+files go stale after a key rotation, since they still hold the old keys. When
+any is stale, the help bar offers `u`, which rewrites all four 0600 files and
+re-checks. The comparison reads the keyring off-screen, so no value is shown.
 
 **Set up once:**
 
@@ -253,11 +263,14 @@ Set each platform's two keys once — `fly secrets set SECRETS_KEY_COMMON=… SE
 `wrangler secret put SECRETS_KEY_COMMON` / `SECRETS_KEY_EDGE`, the Deno dashboard,
 the VPS `.env`. They do **not** change when you rotate a secret.
 
-`e` in the dashboard exports `local/deno.env` (common + edge) and
-`local/docker.env` (common + server). The equivalent commands are
-`npm run creds:env` and `npm run creds:docker`. These 0600 files contain only
-group keys; deployment config such as `PUBLIC_HOST`, `FRONT_SNI`, and `DOH_URL`
-must be added separately. Export refuses to write without the required keyring.
+`e` in the dashboard exports one paste-ready env file per deployment target —
+`local/fly.env` and `local/docker.env` (common + server), `local/worker.env`
+and `local/deno.env` (common + edge). `npm run creds:env` and
+`npm run creds:docker` still write just the Deno and Docker files from the CLI,
+and `npm run creds:keys` prints the same four blocks to the terminal. These
+0600 files contain only group keys; deployment config such as `PUBLIC_HOST`,
+`FRONT_SNI`, and `DOH_URL` must be added separately. Export refuses to write
+without the complete keyring.
 
 **Change a secret afterwards:** edit it in `npm run creds` (the dashboard
 re-encrypts `secrets.enc.json` on every save), `git commit && git push`, then

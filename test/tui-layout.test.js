@@ -52,6 +52,9 @@ function states() {
   const proxy = cs.FIELDS.findIndex((field) => field.key === 'PROXYIP');
   return [
     ...fieldStates,
+    ['envs tab', { ...base, tab: 'envs', keyringGroups: Object.keys(cs.GROUPS),
+      envsStatus: { fly: 'ok', docker: 'stale', wrangler: 'missing', deno: 'ok' } }],
+    ['envs tab (no keyring)', { ...base, tab: 'envs', keyringGroups: [] }],
     ['nuke choices', { ...base, tab: 'nuke' }],
     ['editor', { ...base, tab: 'edge', cursor: proxy, mode: 'edit', edit: {
       key: 'PROXYIP', buffer: 'a-long-edited-hostname.example.invalid', caret: 18, error: null
@@ -78,7 +81,6 @@ function states() {
       fly: { name: 'a-very-long-fly-application-name', keys: ['UUID', 'WSPATH', 'ADMIN_TOKEN'] },
       worker: { name: 'a-very-long-worker-name', keys: ['UUID', 'WSPATH', 'PROVISION_SECRET'] }
     } }],
-    ['keys confirmation', { ...base, mode: 'keys-confirm' }],
     ['setup prompt', { ...base, mode: 'setup-secrets' }],
     ['nuke confirmation', { ...base, tab: 'nuke', mode: 'nuke-confirm', nuke: {
       kind: 'full', input: 'NUKE', error: 'a deliberately long confirmation error that has to truncate'

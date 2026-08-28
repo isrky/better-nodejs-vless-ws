@@ -146,6 +146,25 @@ function NukeChoices({ nuke, compact }) {
     </Box>`;
 }
 
+function Envs({ envs, compact }) {
+  return html`
+    <Box flexDirection="column" width="100%" overflow="hidden" marginTop=${1}>
+      <Text dimColor wrap="truncate-end">${'  '}${envs.label}</Text>
+      ${envs.rows.map((row) => html`
+        <Box key=${row.platform} flexDirection=${compact ? 'column' : 'row'} width="100%" overflow="hidden" marginTop=${1}>
+          <Text bold=${row.selected} color=${row.selected ? 'cyan' : undefined}
+                dimColor=${row.disabled} wrap="truncate-end">
+            ${row.selected ? ' › ' : '   '}${row.title}
+          </Text>
+          <Box flexGrow=${1} minWidth=${0} paddingLeft=${compact ? 3 : 2} overflow="hidden">
+            <Text dimColor=${!row.stale} color=${row.stale ? 'yellow' : undefined} wrap="truncate-end">
+              ${row.filename} · ${row.vars.join(', ')}${row.disabled ? ` (keyring missing ${row.missing.join(', ')})` : (row.freshness ? ` · ${row.freshness}` : '')}
+            </Text>
+          </Box>
+        </Box>`)}
+    </Box>`;
+}
+
 function Frame({ color, children }) {
   return html`
     <Box flexDirection="column" width="100%" overflow="hidden"
@@ -284,14 +303,6 @@ function RevealConfirm({ reveal }) {
   <//>`;
 }
 
-function KeysConfirm({ confirm }) {
-  return html`<${Frame} color="yellow">
-    <Text bold wrap="truncate-end">About to print all ${confirm.groups.length} group keys to this terminal.</Text>
-    <Text wrap="truncate-end">${'  '}They will be grouped for: ${confirm.platforms.join(', ')}.</Text>
-    <Text dimColor wrap="truncate-end">${'  '}They will stay in your scrollback.</Text>
-  <//>`;
-}
-
 function SetupSecrets({ offer }) {
   return html`<${Frame} color="yellow">
     <Text wrap="truncate-end">also generate ${offer.keys.join(' + ')} for the server? (y/N)</Text>
@@ -344,9 +355,9 @@ function PrimaryBody({ vs, viewport, compact }) {
   if (vs.editor) return html`<${Editor} editor=${vs.editor} viewport=${viewport} />`;
   if (vs.caSelect) return html`<${CaSelect} ca=${vs.caSelect} />`;
   if (vs.reveal) return html`<${RevealConfirm} reveal=${vs.reveal} />`;
-  if (vs.keysConfirm) return html`<${KeysConfirm} confirm=${vs.keysConfirm} />`;
   if (vs.setupSecrets) return html`<${SetupSecrets} offer=${vs.setupSecrets} />`;
   if (vs.nuke) return html`<${Nuke} nuke=${vs.nuke} compact=${compact} />`;
+  if (vs.envs) return html`<${Envs} envs=${vs.envs} compact=${compact} />`;
   return vs.activeGroup
     ? html`<${Group} group=${vs.activeGroup} viewport=${viewport} compact=${compact} />`
     : null;
@@ -364,7 +375,7 @@ export function Ui({ vs, viewport = { columns: 80, rows: 24 } }) {
   if (terminalTooSmall(viewport)) return html`<${ResizeNotice} viewport=${viewport} />`;
 
   const compact = viewport.columns < 72;
-  const modal = Boolean(vs.legend || vs.userManager || vs.editor || vs.caSelect || vs.reveal || vs.keysConfirm || vs.setupSecrets ||
+  const modal = Boolean(vs.legend || vs.userManager || vs.editor || vs.caSelect || vs.reveal || vs.setupSecrets ||
     vs.nuke?.confirm || vs.nuke?.running || vs.nuke?.done);
 
   return html`

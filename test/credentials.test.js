@@ -249,23 +249,85 @@ test('exportDockerEnv writes only Docker\'s two group keys at 0600', () => {
   assert.match(announced, /wrote .*docker\.env \(SECRETS_KEY_COMMON, SECRETS_KEY_SERVER\)/);
 });
 
-test('the combined TUI export validates the complete keyring before writing either file', () => {
+test('the combined TUI export validates the complete keyring before writing any file', () => {
   const ctx = tmpStore();
-  const keyringPath = path.join(path.dirname(ctx.storePath), 'secrets.keys.json');
+  const dir = path.dirname(ctx.storePath);
+  const keyringPath = path.join(dir, 'secrets.keys.json');
   const keys = ce.generateKeys();
   ce.writeKeyring({ common: keys.common, edge: keys.edge }, keyringPath);
   const said = [];
 
+  const envFiles = ['fly.env', 'docker.env', 'worker.env', 'deno.env'];
+
   assert.equal(cm.exportKeyEnvs(ctx.storePath, (s) => said.push(String(s)), keyringPath), null);
   assert.match(said.join('\n'), /missing server/);
-  assert.ok(!fs.existsSync(path.join(path.dirname(ctx.storePath), 'deno.env')));
-  assert.ok(!fs.existsSync(path.join(path.dirname(ctx.storePath), 'docker.env')));
+  for (const file of envFiles) {
+    assert.ok(!fs.existsSync(path.join(dir, file)), `${file} is not written without the full keyring`);
+  }
 
   ce.writeKeyring(keys, keyringPath);
   const paths = cm.exportKeyEnvs(ctx.storePath, () => {}, keyringPath);
-  assert.equal(paths.length, 2);
-  assert.ok(fs.existsSync(path.join(path.dirname(ctx.storePath), 'deno.env')));
-  assert.ok(fs.existsSync(path.join(path.dirname(ctx.storePath), 'docker.env')));
+  assert.equal(paths.length, 4);
+  for (const file of envFiles) {
+    assert.ok(fs.existsSync(path.join(dir, file)), `${file} is written for its target`);
+  }
+});
+
+test('copyEnvToClipboard copies one target\'s keys, reports the method, and never logs a value', () => {
+  const ctx = tmpStore();
+  const keyringPath = path.join(path.dirname(ctx.storePath), 'secrets.keys.json');
+  const keys = ce.generateKeys();
+  ce.writeKeyring(keys, keyringPath);
+
+  const copied = [];
+  const said = [];
+  const write = (text) => { copied.push(text); return 'wl-copy'; };
+  const method = cm.copyEnvToClipboard(ctx.storePath, 'wrangler', (s) => said.push(String(s)), keyringPath, write);
+
+  assert.equal(method, 'wl-copy');
+  assert.equal(copied.length, 1);
+  // The clipboard text is the same paste-ready body the file export writes.
+  assert.equal(copied[0], `SECRETS_KEY_COMMON=${keys.common}\nSECRETS_KEY_EDGE=${keys.edge}\n`);
+  const announced = said.join('\n');
+  assert.match(announced, /copied worker\.env to the clipboard via wl-copy \(SECRETS_KEY_COMMON, SECRETS_KEY_EDGE\)/);
+  assert.ok(!announced.includes(keys.common) && !announced.includes(keys.edge), 'no key value is logged');
+});
+
+test('envFileStatus reports no-keyring, missing, ok, then stale after a rotation', () => {
+  const ctx = tmpStore();
+  const keyringPath = path.join(path.dirname(ctx.storePath), 'secrets.keys.json');
+
+  // No keyring at all → every target reports no-keyring.
+  const none = cm.envFileStatus(ctx.storePath, keyringPath);
+  assert.deepEqual(none, { fly: 'no-keyring', docker: 'no-keyring', wrangler: 'no-keyring', deno: 'no-keyring' });
+
+  // Keyring present but nothing exported yet → every file is missing.
+  const keys = ce.generateKeys();
+  ce.writeKeyring(keys, keyringPath);
+  const before = cm.envFileStatus(ctx.storePath, keyringPath);
+  assert.deepEqual(before, { fly: 'missing', docker: 'missing', wrangler: 'missing', deno: 'missing' });
+
+  // Right after the export every file matches the keyring.
+  cm.exportKeyEnvs(ctx.storePath, () => {}, keyringPath);
+  const after = cm.envFileStatus(ctx.storePath, keyringPath);
+  assert.deepEqual(after, { fly: 'ok', docker: 'ok', wrangler: 'ok', deno: 'ok' });
+
+  // Rotate the keys without re-exporting → the files now hold the old keys.
+  ce.writeKeyring(ce.generateKeys(), keyringPath);
+  const rotated = cm.envFileStatus(ctx.storePath, keyringPath);
+  assert.deepEqual(rotated, { fly: 'stale', docker: 'stale', wrangler: 'stale', deno: 'stale' });
+});
+
+test('copyEnvToClipboard refuses and touches nothing when the keyring is missing', () => {
+  const ctx = tmpStore();
+  const missing = path.join(path.dirname(ctx.storePath), 'absent.keys.json');
+  const said = [];
+  let wrote = false;
+  const method = cm.copyEnvToClipboard(ctx.storePath, 'fly', (s) => said.push(String(s)), missing, () => { wrote = true; return 'x'; });
+
+  assert.equal(method, null);
+  assert.equal(wrote, false, 'the clipboard writer is never called');
+  assert.match(said.join('\n'), /no keyring|missing/);
 });
 
 test('printFrontPin probes and prints FRONT_CERT_PIN plus the cert description', async () => {

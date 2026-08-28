@@ -30,7 +30,7 @@ import {
   emptyStore, readStore, writeStore, storeMode, withField,
   redact, validateStore,
   parseLegacyEnv, planImport, pushPlan, publicHostWarnings, platformNames,
-  writeEnvFile, PLATFORM_GROUPS
+  writeEnvFile, PLATFORM_GROUPS, PLATFORM_META
 } from './credstore.mjs';
 
 import {
@@ -38,6 +38,8 @@ import {
   writeSecretsFile, readSecretsFile, platformKeys,
   DEFAULT_KEYRING_PATH, SECRETS_FILE_PATH
 } from './credsecrets.mjs';
+
+import { writeClipboard } from './clipboard.mjs';
 
 const require = createRequire(import.meta.url);
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -298,11 +300,15 @@ function requireKeyring(keyringPath, platforms, out) {
   return keys;
 }
 
+/** The paste-ready dotenv body for a platform's group keys. Carries secrets. */
+function platformEnvText(platform, keys) {
+  return platformKeys(platform, keys).map(({ envName, value }) => `${envName}=${value}`).join('\n') + '\n';
+}
+
 function writePlatformKeyEnv(platform, filename, storePath, keys, out, guidance) {
   const entries = platformKeys(platform, keys);
   const path = resolve(dirname(storePath), filename);
-  const text = entries.map(({ envName, value }) => `${envName}=${value}`).join('\n') + '\n';
-  writeEnvFile(path, text);
+  writeEnvFile(path, platformEnvText(platform, keys));
   out(`  wrote ${path.replace(ROOT + '/', '')} (${entries.map(({ envName }) => envName).join(', ')})`);
   out(dim(guidance));
   return path;
@@ -326,20 +332,56 @@ export function exportDockerEnv(storePath, out, keyringPath = DEFAULT_KEYRING_PA
   );
 }
 
-/** Export both dashboard files after validating the complete keyring once. */
+// Per-target paste guidance. Filenames live in PLATFORM_META (credstore) so the
+// export, the reveal, and the envs tab all name the files the same way.
+const PLATFORM_GUIDANCE = {
+  fly: '  set with: fly secrets set SECRETS_KEY_COMMON=… SECRETS_KEY_SERVER=… (or fly secrets import < local/fly.env)',
+  docker: "  paste its contents into the Dockge stack's .env editor; add deployment config separately",
+  wrangler: '  add each as a Worker secret: wrangler secret put SECRETS_KEY_COMMON / SECRETS_KEY_EDGE (or the dashboard)',
+  deno: '  upload it in the Deno Deploy dashboard, or paste its contents into the env import'
+};
+
+/** Export one paste-ready env file per target after validating the complete keyring once. */
 export function exportKeyEnvs(storePath, out, keyringPath = DEFAULT_KEYRING_PATH) {
-  const keys = requireKeyring(keyringPath, ['deno', 'docker'], out);
+  const platforms = Object.keys(PLATFORM_GROUPS);
+  const keys = requireKeyring(keyringPath, platforms, out);
   if (!keys) return null;
-  const paths = [];
-  paths.push(writePlatformKeyEnv(
-    'deno', 'deno.env', storePath, keys, out,
-    '  upload it in the Deno Deploy dashboard, or paste its contents into the env import'
-  ));
-  paths.push(writePlatformKeyEnv(
-    'docker', 'docker.env', storePath, keys, out,
-    "  paste its contents into the Dockge stack's .env editor; add deployment config separately"
-  ));
-  return paths;
+  return platforms.map((platform) =>
+    writePlatformKeyEnv(platform, PLATFORM_META[platform].envFile, storePath, keys, out, PLATFORM_GUIDANCE[platform]));
+}
+
+/**
+ * Per-target env-file freshness, for the dashboard's envs tab. Compares each
+ * written file against what the current keyring would produce and returns an
+ * enum per platform ('ok' | 'stale' | 'missing' | 'no-keyring') — never a key
+ * value, so the result is safe to surface in a frame.
+ */
+export function envFileStatus(storePath, keyringPath = DEFAULT_KEYRING_PATH) {
+  const keys = readKeyring(keyringPath);
+  const status = {};
+  for (const platform of Object.keys(PLATFORM_GROUPS)) {
+    if (!PLATFORM_GROUPS[platform].every((g) => keys?.[g])) { status[platform] = 'no-keyring'; continue; }
+    const path = resolve(dirname(storePath), PLATFORM_META[platform].envFile);
+    if (!existsSync(path)) { status[platform] = 'missing'; continue; }
+    status[platform] = readFileSync(path, 'utf8') === platformEnvText(platform, keys) ? 'ok' : 'stale';
+  }
+  return status;
+}
+
+/**
+ * Copy one target's paste-ready group-key block to the clipboard. Reads the
+ * keyring at call time (the values never live in the TUI state), and only ever
+ * logs the filename, method, and env-var names — never a value. `write` is
+ * injectable so tests don't touch a real clipboard. `storePath` is accepted for
+ * signature parity with exportKeyEnvs; the keyring is always the canonical one.
+ */
+export function copyEnvToClipboard(storePath, platform, out, keyringPath = DEFAULT_KEYRING_PATH, write = writeClipboard) {
+  const keys = requireKeyring(keyringPath, [platform], out);
+  if (!keys) return null;
+  const entries = platformKeys(platform, keys);
+  const method = write(platformEnvText(platform, keys));
+  out(`  copied ${PLATFORM_META[platform].envFile} to the clipboard via ${method} (${entries.map(({ envName }) => envName).join(', ')})`);
+  return method;
 }
 
 /**
@@ -487,9 +529,9 @@ const KEY_GUIDANCE = {
   wrangler: 'add these two secrets to the Cloudflare Worker',
   deno: 'paste this block into the Deno Deploy environment import'
 };
-const PLATFORM_TITLES = {
-  fly: 'Fly', docker: 'VPS / Docker', wrangler: 'Cloudflare Worker', deno: 'Deno Deploy'
-};
+const PLATFORM_TITLES = Object.fromEntries(
+  Object.entries(PLATFORM_META).map(([platform, { title }]) => [platform, title])
+);
 
 /**
  * The group keys, grouped into contiguous dotenv blocks for each platform.

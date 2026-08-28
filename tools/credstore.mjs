@@ -310,6 +310,18 @@ export const PLATFORM_GROUPS = {
   deno: ['common', 'edge']
 };
 
+/**
+ * Per-target display name and env-file name. One source of truth shared by the
+ * file export, the reveal, and the dashboard's envs tab. The filename is
+ * decoupled from the internal platform key (wrangler → worker.env).
+ */
+export const PLATFORM_META = {
+  fly: { title: 'Fly', envFile: 'fly.env' },
+  docker: { title: 'VPS / Docker', envFile: 'docker.env' },
+  wrangler: { title: 'Cloudflare Worker', envFile: 'worker.env' },
+  deno: { title: 'Deno Deploy', envFile: 'deno.env' }
+};
+
 /** The group a field belongs to, or null if it is not a shared secret. */
 export function groupOf(key) {
   for (const [group, keys] of Object.entries(GROUPS)) {
