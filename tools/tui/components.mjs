@@ -36,7 +36,7 @@ function EditableInput({ input, viewport, placeholder }) {
     <Box width="100%" overflow="hidden">
       <Text color="cyan">${'> '}</Text>
       <Text>${shown.before}</Text>
-      <Text color="cyan">▌</Text>
+      <Text color="cyan">█</Text>
       <Text>${shown.after}</Text>
       ${input.empty && placeholder ? html`
         <Box flexGrow=${1} minWidth=${0} overflow="hidden">
@@ -164,7 +164,7 @@ function NukeConfirm({ confirm }) {
     <Box marginTop=${1} width="100%" overflow="hidden">
       <Text color="red">${'> '}</Text>
       ${confirm.input ? html`<Text wrap="truncate-end">${confirm.input}</Text>` : null}
-      <Text color="red">▌</Text>
+      <Text color="red">█</Text>
       ${!confirm.input ? html`<Text dimColor wrap="truncate-end">${'  '}type NUKE</Text>` : null}
     </Box>
     ${confirm.error ? html`<Text color="red" wrap="truncate-end">${confirm.error}</Text>` : null}

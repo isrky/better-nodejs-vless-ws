@@ -159,7 +159,7 @@ test('editor and user-list cursors remain visible at compact width', () => {
     key: 'FLY_HOST', buffer: 'left-side-right-side', caret: 9, error: null
   } };
   const edited = stripAnsi(renderState(editor, { columns: 50, rows: 16 }));
-  assert.match(edited, /left-side▌-right-side/);
+  assert.match(edited, /left-side█-right-side/);
 
   const users = { ...base, mode: 'users', users: {
     view: 'list', cursor: 11, draft: null, confirm: null, error: null
