@@ -107,8 +107,8 @@ else to restore.
 ### Emergency rotation: the `nuke` tab
 
 The fifth, red `nuke` tab is the deliberate "assume these credentials leaked"
-path. It offers two actions and requires typing the exact uppercase word
-`NUKE` before either one writes anything:
+path. It offers two actions and requires typing `NUKE` (any case) before
+either one writes anything:
 
 - **soft nuke** regenerates `UUID` and `WSPATH`, plus `ADMIN_TOKEN` and
   `PROVISION_SECRET` when those optional features are already enabled. It keeps
@@ -119,11 +119,14 @@ path. It offers two actions and requires typing the exact uppercase word
   keys or ciphertext.
 
 Neither action enables an optional feature that was unset, and neither changes
-hosts, CA choices, `USERS`, or `PROXYIP`. When provisioning is enabled, the old
+hosts, CA choices, `USERS`, or `PROXYIP`. They differ in how the provisioning
+secret transitions: on a **soft** nuke, when provisioning is enabled the old
 `PROVISION_SECRET` becomes `PROVISION_SECRET_PREVIOUS` so already-issued users
-keep working during the transition; remove the previous value after reissuing
-them if the response requires immediate invalidation. An orphaned previous
-secret is cleared when there is no current provisioning secret to rotate.
+keep working during the cutover; remove the previous value after reissuing them
+if the response requires immediate invalidation. An orphaned previous secret is
+cleared when there is no current provisioning secret to rotate. A **full** nuke
+is a total reset — it deletes `PROVISION_SECRET_PREVIOUS` outright, so every
+already-issued user is cut off and must be reissued after the rotation.
 
 The full operation prepares every new value before writing and restores the
 store, its prior backup, the keyring, and the ciphertext if any write fails.

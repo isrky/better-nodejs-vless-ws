@@ -158,12 +158,14 @@ function NukeConfirm({ confirm }) {
   return html`<${Frame} color="red">
     <Text bold color="red" wrap="truncate-end">CONFIRM ${confirm.kind.toUpperCase()} NUKE</Text>
     <Text wrap="truncate-end">This replaces active credentials${confirm.kind === 'full' ? ' and every encryption-group key' : ''}.</Text>
-    <Text dimColor wrap="truncate-end">The current provisioning secret becomes the previous secret for the transition.</Text>
+    <Text dimColor wrap="truncate-end">${confirm.kind === 'full'
+      ? 'Already-issued users are cut off — reissue every user after this.'
+      : 'The current provisioning secret becomes the previous secret for the transition.'}</Text>
     <Box marginTop=${1} width="100%" overflow="hidden">
       <Text color="red">${'> '}</Text>
       ${confirm.input ? html`<Text wrap="truncate-end">${confirm.input}</Text>` : null}
       <Text color="red">▌</Text>
-      ${!confirm.input ? html`<Text dimColor wrap="truncate-end">${'  '}type NUKE exactly</Text>` : null}
+      ${!confirm.input ? html`<Text dimColor wrap="truncate-end">${'  '}type NUKE</Text>` : null}
     </Box>
     ${confirm.error ? html`<Text color="red" wrap="truncate-end">${confirm.error}</Text>` : null}
   <//>`;

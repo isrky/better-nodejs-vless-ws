@@ -262,7 +262,7 @@ export function enrich(state, action, gen = generate) {
     }
     return { type: 'SETUP_SECRETS', yes: true, values };
   }
-  if (action.type === 'NUKE_SUBMIT' && state.nuke?.input === 'NUKE' && !action.values) {
+  if (action.type === 'NUKE_SUBMIT' && state.nuke?.input?.toUpperCase() === 'NUKE' && !action.values) {
     const values = {};
     for (const f of NUKE_GENERATABLE_FIELDS) {
       if (f.required || state.store.credentials[f.key] !== undefined) values[f.key] = gen(f.key);
@@ -272,11 +272,16 @@ export function enrich(state, action, gen = generate) {
   return action;
 }
 
-function applyNukeValues(store, values) {
+function applyNukeValues(store, values, kind) {
   const oldProvision = store.credentials.PROVISION_SECRET;
   let updated = store;
   for (const [key, value] of Object.entries(values || {})) updated = withField(updated, key, value);
-  updated = withField(updated, 'PROVISION_SECRET_PREVIOUS', oldProvision ?? null);
+  // A soft nuke demotes the current provisioning secret so already-issued users
+  // keep working through the cutover. A full nuke is a total reset — old group
+  // keys and ciphertext are discarded — so the previous secret is cleared too,
+  // cutting every issued user off until they are reissued.
+  const previous = kind === 'full' ? null : (oldProvision ?? null);
+  updated = withField(updated, 'PROVISION_SECRET_PREVIOUS', previous);
   return updated;
 }
 
@@ -363,12 +368,12 @@ export function reduce(state, action, deps = defaultDeps) {
 
     case 'NUKE_SUBMIT': {
       if (state.mode !== 'nuke-confirm') return only(state);
-      if (state.nuke.input !== 'NUKE') {
-        return only({ ...state, nuke: { ...state.nuke, error: 'type NUKE exactly to continue' } });
+      if (state.nuke.input.toUpperCase() !== 'NUKE') {
+        return only({ ...state, nuke: { ...state.nuke, error: 'type NUKE to continue' } });
       }
       if (!action.values) return only(state);
       const rollback = state.store;
-      const store = applyNukeValues(state.store, action.values);
+      const store = applyNukeValues(state.store, action.values, state.nuke.kind);
       return {
         state: {
           ...state,

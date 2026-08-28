@@ -573,19 +573,29 @@ test('the nuke tab is danger-styled and offers soft and full actions', () => {
   assert.equal(opened.nuke.kind, 'soft');
 });
 
-test('nuke requires exact uppercase confirmation and supports editing/cancel', () => {
+test('nuke confirmation is case-insensitive and supports editing/cancel', () => {
   let state = { ...init(tmpStore()), tab: 'nuke' };
   state = step(state, { type: 'NUKE_OPEN' });
-  for (const ch of 'nuke') state = step(state, td.keymap(state, ch, {}));
+
+  // A word that is not "nuke" in any case still errors.
+  for (const ch of 'xy') state = step(state, td.keymap(state, ch, {}));
   state = step(state, td.enrich(state, td.keymap(state, '', { return: true }), () => 'unused'));
   assert.equal(state.mode, 'nuke-confirm');
-  assert.match(state.nuke.error, /exactly/);
+  assert.match(state.nuke.error, /type NUKE/);
 
+  // Editing and cancel keys are wired.
   assert.deepEqual(td.keymap(state, '', { backspace: true }), { type: 'NUKE_BACKSPACE' });
   assert.deepEqual(td.keymap(state, '', { escape: true }), { type: 'NUKE_CANCEL' });
   state = step(state, { type: 'NUKE_CANCEL' });
   assert.equal(state.mode, 'dashboard');
   assert.equal(state.nuke, null);
+
+  // Reopen: a lowercase confirmation is accepted just like the uppercase word.
+  state = step(state, { type: 'NUKE_OPEN' });
+  for (const ch of 'nuke') state = step(state, td.keymap(state, ch, {}));
+  const action = td.enrich(state, td.keymap(state, '', { return: true }), (key) => `new-${key}`);
+  state = step(state, action);
+  assert.equal(state.mode, 'nuke-running');
 });
 
 test('soft nuke rotates active credentials and rolls provisioning current into previous', () => {
@@ -618,6 +628,33 @@ test('soft nuke rotates active credentials and rolls provisioning current into p
   assert.equal(state.mode, 'nuke-done');
   assert.equal(td.visibleState(state).nuke.done.kind, 'soft');
   assert.ok(!visibleJson(state).includes('new-ADMIN_TOKEN'));
+});
+
+test('full nuke rotates credentials and clears the previous provisioning secret', () => {
+  const ctx = tmpStore({
+    ADMIN_TOKEN: 'old-admin',
+    PROVISION_SECRET: 'old-provision',
+    PROVISION_SECRET_PREVIOUS: 'older-provision'
+  });
+  let state = td.initState({
+    ...ctx, tab: 'nuke', canFullNuke: true,
+    keyringGroups: Object.keys(cs.GROUPS)
+  }, deps);
+  state = { ...state, tab: 'nuke', nukeCursor: 1 };
+  state = step(state, { type: 'NUKE_OPEN' });
+  assert.equal(state.nuke.kind, 'full');
+
+  state = { ...state, nuke: { ...state.nuke, input: 'NUKE' } };
+  const action = td.enrich(state, { type: 'NUKE_SUBMIT' }, (key) => `new-${key}`);
+  const effects = [];
+  state = step(state, action, { effects });
+
+  assert.equal(state.mode, 'nuke-running');
+  assert.equal(state.store.credentials.PROVISION_SECRET, 'new-PROVISION_SECRET');
+  // A full nuke cuts issued users off: no previous secret survives.
+  assert.equal('PROVISION_SECRET_PREVIOUS' in state.store.credentials, false);
+  assert.equal(effects[0].type, 'nuke');
+  assert.equal(effects[0].kind, 'full');
 });
 
 test('nuke preserves unset optional features and clears an orphaned previous secret', () => {
