@@ -34,16 +34,18 @@ const FAKE_INDEX_HTML = `<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <nav>
-        <ul>
-            <li><strong>Northwind Systems</strong></li>
-        </ul>
-        <ul>
-            <li><a href="#">Products</a></li>
-            <li><a href="#">Pricing</a></li>
-            <li><a href="#">Support</a></li>
-        </ul>
-    </nav>
+    <header>
+        <nav>
+            <ul>
+                <li><strong>Northwind Systems</strong></li>
+            </ul>
+            <ul>
+                <li><a href="#">Products</a></li>
+                <li><a href="#">Pricing</a></li>
+                <li><a href="#">Support</a></li>
+            </ul>
+        </nav>
+    </header>
     <main>
         <header>
             <h1>Infrastructure that stays out of your way</h1>
