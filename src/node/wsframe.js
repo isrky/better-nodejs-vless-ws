@@ -120,6 +120,11 @@ function encodeFrame(opcode, payload) {
 function encodeMuxFrame(opcode, meta, hasData, payload) {
   const metaLen = meta.length;
   const dataLen = hasData ? payload.length : 0;
+  // Both length fields are u16. Overflowing one silently (65536 -> 0) leaves
+  // the WebSocket frame valid but desyncs the client's mux parser, so fail
+  // loudly here; callers split large payloads (see MAX_MUX_CHUNK in mux.js).
+  if (metaLen > 0xffff) throw new RangeError('Mux metaLen exceeds u16: ' + metaLen);
+  if (dataLen > 0xffff) throw new RangeError('Mux dataLen exceeds u16: ' + dataLen);
   const plen = 2 + metaLen + (hasData ? 2 + dataLen : 0);
 
   const out = Buffer.allocUnsafe(headerLengthFor(plen) + plen);

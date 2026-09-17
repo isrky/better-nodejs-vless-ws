@@ -448,6 +448,8 @@ So: `8` on Fly or Workers Paid, `-1` on Workers Free.
 > Until recently `-1` was the only setting that worked correctly, because the mux path had no `PROXYIP` retry: multiplexed substreams could not reach Cloudflare-hosted origins at all, so enabling mux silently broke a large share of the web while direct-dial destinations kept working. `src/worker/mux.mjs` now performs the same per-substream retry that `src/worker/relay.mjs` does. The retry is per substream rather than per connection, since one mux session carries many destinations at once.
 >
 > Note that several *simultaneous* large downloads can still fail with `unexpected eof`. That behaviour is identical with mux on and off, so it is a property of the tunnel rather than of multiplexing.
+>
+> The Fly/Node build had its own mux-only failure until September 2026: it framed each TCP read as one Keep frame, and Node hands the relay reads of exactly 65536 bytes on a fast link. The Mux.Cool length field is 16-bit, so that frame declared zero bytes while carrying 64 KiB, and the client's mux parser desynced and dropped the whole session — every substream at once — the moment any response exceeded 64 KiB. Small pages worked, most real sites did not, and `-1` was unaffected because the plain relay has no length field. `src/node/mux.js` now splits reads at 65535 bytes exactly as `src/worker/mux.mjs` always has. If you set `-1` on Fly to work around this, `8` is safe again.
 
 The `listen`/`port`/`sockopt.mark` values are specific to your nftables or iptables TPROXY rules and will need adjusting to match them.
 

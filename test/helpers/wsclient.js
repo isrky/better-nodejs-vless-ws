@@ -98,6 +98,11 @@ function muxKeepMeta(id) {
   return Buffer.from([(id >>> 8) & 0xff, id & 0xff, 2, 1]);
 }
 
+/** meta for the session-level KeepAlive frame Xray sends periodically (cmd 4). */
+function muxKeepAliveMeta() {
+  return Buffer.from([0, 0, 4, 0]);
+}
+
 /**
  * Connect, perform the WebSocket handshake, and return a small client.
  *
@@ -182,5 +187,6 @@ function connectWs(port, path = '/') {
 }
 
 module.exports = {
-  connectWs, clientFrame, vlessHeader, muxFrame, muxNewMeta, muxNewDomainMeta, muxKeepMeta
+  connectWs, clientFrame, vlessHeader, muxFrame, muxNewMeta, muxNewDomainMeta, muxKeepMeta,
+  muxKeepAliveMeta
 };

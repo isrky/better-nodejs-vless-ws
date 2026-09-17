@@ -11,7 +11,7 @@
 //
 //   u16 id | u8 cmd | u8 opt | (u8 network | u16 port | address)?
 //
-// cmd 1 = New substream, 2 = Keep (carry data), 3 = End.
+// cmd 1 = New substream, 2 = Keep (carry data), 3 = End, 4 = KeepAlive.
 // opt bit 0 = a data section follows.
 // network 1 = TCP, 2 = UDP.
 //
@@ -29,6 +29,13 @@ const { ByteQueue, isBlockedDomain, parseMuxAddress } = require('../vless.js');
 const MUX_CMD_NEW = 1;
 const MUX_CMD_KEEP = 2;
 const MUX_CMD_END = 3;
+const MUX_CMD_KEEPALIVE = 4;
+
+// Mux dataLen is 16-bit, so reads off a TCP socket must be split before
+// framing. Node hands 'data' chunks of exactly 65536 bytes on a fast link,
+// and 65536 & 0xffff === 0: framed whole, that chunk declares zero bytes
+// while carrying 64 KiB, and the client's mux parser desyncs for good.
+const MAX_MUX_CHUNK = 65535;
 
 const NETWORK_TCP = 1;
 const NETWORK_UDP = 2;
@@ -134,6 +141,8 @@ class MuxSession {
         if (!this.#onKeep(id, meta, metaLen, hasData, data)) return;
       } else if (cmd === MUX_CMD_END) {
         this.endStream(id);
+      } else if (cmd === MUX_CMD_KEEPALIVE) {
+        // Session-level heartbeat from Xray; nothing to do.
       } else {
         this.#session.log('MUX-ERR', `[${id}] Unknown Mux command: ${cmd}`);
       }
@@ -263,7 +272,7 @@ class MuxSession {
     entry.handle.on('data', (reply) => {
       if (this.#dead) return;
       this.#session.stats.addRx(this.#session.connInfo, record, reply.length);
-      if (!this.#session.sendMux(metaKeep(id), true, reply)) {
+      if (!this.#sendKeep(id, reply)) {
         this.#session.pauseSource(entry.handle);
       }
     });
@@ -276,6 +285,10 @@ class MuxSession {
 
     entry.handle.on('error', (e) => {
       this.#session.log('MUX-ERR', `[${id}][TCP] Error: ${e}`);
+      // endStream() drops the 'close' listener before destroying the socket,
+      // so End has to go out from here or the client never hears that the
+      // dial failed and waits out its own timeout on every dead target.
+      if (!this.#dead) this.#sendEnd(id);
       this.endStream(id);
     });
 
@@ -300,6 +313,7 @@ class MuxSession {
 
     socket.on('error', (e) => {
       this.#session.log('MUX-ERR', `[${id}][UDP] Socket Error: ${e}`);
+      if (!this.#dead) this.#sendEnd(id);
       this.endStream(id);
     });
 
@@ -310,6 +324,20 @@ class MuxSession {
     if (!entry) return;
     this.#session.stats.addTx(this.#session.connInfo, entry.record, data.length);
     this.#session.dns.resolveAndSend(entry.socket, data, entry.port, entry.host, () => {});
+  }
+
+  /**
+   * Send `data` to the client as one or more Keep frames of at most
+   * MAX_MUX_CHUNK bytes each. Returns false when the client socket wants
+   * backpressure, mirroring sendMux.
+   */
+  #sendKeep(id, data) {
+    let writable = true;
+    for (let off = 0; off < data.length; off += MAX_MUX_CHUNK) {
+      const end = Math.min(off + MAX_MUX_CHUNK, data.length);
+      if (!this.#session.sendMux(metaKeep(id), true, data.subarray(off, end))) writable = false;
+    }
+    return writable;
   }
 
   #sendEnd(id) {

@@ -17,7 +17,7 @@ const { createServer } = require('../src/node/server.js');
 const { loadConfig } = require('../src/node/config.js');
 const { createDnsCache } = require('../src/node/dnscache.js');
 const {
-  connectWs, vlessHeader, muxFrame, muxNewMeta, muxNewDomainMeta, muxKeepMeta
+  connectWs, vlessHeader, muxFrame, muxNewMeta, muxNewDomainMeta, muxKeepMeta, muxKeepAliveMeta
 } = require('./helpers/wsclient.js');
 
 const UUID = '7bd180e8-1142-4387-93f5-03e8d750a896';
@@ -41,6 +41,43 @@ function startTcpEcho() {
         for (const s of open) s.destroy();
       })
     }));
+  });
+}
+
+/**
+ * A TCP server that answers the first byte it receives with `size` bytes of a
+ * deterministic pattern in one write, so the proxy sees the largest chunks
+ * the kernel will hand it.
+ */
+function startTcpFlood(size) {
+  return new Promise((resolve) => {
+    const open = new Set();
+    const body = Buffer.alloc(size);
+    for (let i = 0; i < size; i++) body[i] = i & 0xff;
+    const server = net.createServer((s) => {
+      open.add(s);
+      s.on('close', () => open.delete(s));
+      s.once('data', () => s.end(body));
+      s.on('error', () => {});
+    });
+    server.listen(0, '127.0.0.1', () => resolve({
+      port: server.address().port,
+      close: () => new Promise((done) => {
+        server.close(done);
+        for (const s of open) s.destroy();
+      })
+    }));
+  });
+}
+
+/** A TCP port that is guaranteed to refuse connections right now. */
+function closedTcpPort() {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.listen(0, '127.0.0.1', () => {
+      const port = server.address().port;
+      server.close(() => resolve(port));
+    });
   });
 }
 
@@ -320,6 +357,104 @@ test('a Mux substream to an allowed domain still opens', { timeout: 15000 }, asy
   assert.equal(meta[2], 2, 'cmd Keep - the substream opened');
   const dataLen = (frame[2 + metaLen] << 8) | frame[3 + metaLen];
   assert.equal(frame.subarray(4 + metaLen, 4 + metaLen + dataLen).toString(), 'NAMED');
+});
+
+test('a large Mux download is split into frames whose dataLen matches the payload', { timeout: 30000 }, async (t) => {
+  // Node hands the relay read chunks of exactly 65536 bytes on a fast link,
+  // and the Mux.Cool dataLen field is 16-bit: 65536 & 0xffff === 0. Before
+  // the fix the server emitted a Keep frame declaring zero bytes while
+  // carrying 64 KiB, and every Xray client with mux enabled desynced and
+  // dropped the whole session as soon as a response exceeded 64 KiB.
+  const SIZE = 1024 * 1024;
+  const flood = await startTcpFlood(SIZE);
+  const proxy = await startProxy();
+  t.after(async () => { await proxy.close(); await flood.close(); });
+
+  const ws = await connectWs(proxy.port);
+  t.after(() => ws.close());
+
+  ws.send(vlessHeader(config.uuidBytes, 3));
+  assert.deepEqual(await ws.next(), Buffer.from([0x00, 0x00]));
+
+  ws.send(muxFrame(muxNewMeta(21, 1, '127.0.0.1', flood.port), Buffer.from('go')));
+
+  let received = 0;
+  let frames = 0;
+  while (received < SIZE) {
+    const frame = await ws.next(10000);
+    const metaLen = (frame[0] << 8) | frame[1];
+    const meta = frame.subarray(2, 2 + metaLen);
+    assert.equal((meta[0] << 8) | meta[1], 21, 'substream id');
+    if (meta[2] === 3) assert.fail(`End frame after ${received} of ${SIZE} bytes`);
+    assert.equal(meta[2], 2, 'cmd Keep');
+    assert.equal(meta[3] & 1, 1, 'opt: data follows');
+
+    const dataLen = (frame[2 + metaLen] << 8) | frame[3 + metaLen];
+    assert.ok(dataLen > 0, `frame ${frames} declares dataLen 0 but is ${frame.length} bytes long`);
+    assert.equal(frame.length, 4 + metaLen + dataLen, `frame ${frames}: declared dataLen matches the payload`);
+
+    const data = frame.subarray(4 + metaLen);
+    for (let i = 0; i < data.length; i++) {
+      if (data[i] !== ((received + i) & 0xff)) assert.fail(`byte ${received + i} corrupted`);
+    }
+    received += dataLen;
+    frames += 1;
+  }
+  assert.equal(received, SIZE);
+  assert.ok(frames >= Math.ceil(SIZE / 65535), 'no frame carried more than 65535 bytes');
+});
+
+test('a Mux substream whose dial fails gets an End frame', { timeout: 15000 }, async (t) => {
+  // The non-mux path destroys the whole session on a refused dial, so the
+  // client fails fast. Mux has to say End for that one substream instead;
+  // without it the client waits out its own timeout on every dead target.
+  const port = await closedTcpPort();
+  const proxy = await startProxy();
+  t.after(async () => { await proxy.close(); });
+
+  const ws = await connectWs(proxy.port);
+  t.after(() => ws.close());
+
+  ws.send(vlessHeader(config.uuidBytes, 3));
+  assert.deepEqual(await ws.next(), Buffer.from([0x00, 0x00]));
+
+  ws.send(muxFrame(muxNewMeta(22, 1, '127.0.0.1', port), Buffer.from('x')));
+
+  const frame = await ws.next();
+  const metaLen = (frame[0] << 8) | frame[1];
+  const meta = frame.subarray(2, 2 + metaLen);
+  assert.equal((meta[0] << 8) | meta[1], 22, 'substream id');
+  assert.equal(meta[2], 3, 'cmd End');
+});
+
+test('a Mux KeepAlive frame is accepted without error', { timeout: 15000 }, async (t) => {
+  const echo = await startTcpEcho();
+  const logged = [];
+  const handle = createServer({ config, logger: (...args) => logged.push(args.join(' ')) });
+  const open = new Set();
+  handle.server.on('connection', (s) => { open.add(s); s.on('close', () => open.delete(s)); });
+  await new Promise((done) => handle.server.listen(0, '127.0.0.1', done));
+  const port = handle.server.address().port;
+  t.after(async () => {
+    await new Promise((done) => { handle.close(done); for (const s of open) s.destroy(); });
+    await echo.close();
+  });
+
+  const ws = await connectWs(port);
+  t.after(() => ws.close());
+
+  ws.send(vlessHeader(config.uuidBytes, 3));
+  assert.deepEqual(await ws.next(), Buffer.from([0x00, 0x00]));
+
+  ws.send(muxFrame(muxKeepAliveMeta(), null));
+  ws.send(muxFrame(muxNewMeta(23, 1, '127.0.0.1', echo.port), Buffer.from('alive')));
+
+  const frame = await ws.next();
+  const metaLen = (frame[0] << 8) | frame[1];
+  const dataLen = (frame[2 + metaLen] << 8) | frame[3 + metaLen];
+  assert.equal(frame.subarray(4 + metaLen, 4 + metaLen + dataLen).toString(), 'ALIVE');
+
+  assert.ok(!logged.some((l) => /MUX-ERR/.test(l)), `KeepAlive must not log an error: ${logged.join('\n')}`);
 });
 
 test('a validated tunnel IS counted', { timeout: 15000 }, async (t) => {
